@@ -1,6 +1,10 @@
 package com.kaique.casahub.data
 
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -47,14 +51,19 @@ class SmartThingsRepository(
             val started = System.currentTimeMillis()
             val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod = method
-                connectTimeout = 10_000
-                readTimeout = 15_000
+                connectTimeout = 7_000
+                readTimeout = if (method == "POST") 9_000 else 12_000
                 setRequestProperty("Authorization", "Bearer $token")
                 setRequestProperty("Accept", "application/json")
                 if (body != null) {
                     doOutput = true
                     setRequestProperty("Content-Type", "application/json; charset=utf-8")
                 }
+            }
+            // Se a chamada for cancelada (tempo esgotado, tela fechada), derruba a conexão na hora:
+            // sem isso a leitura bloqueada seguraria a fila de comandos até o timeout do socket.
+            val guard = launch(start = CoroutineStart.UNDISPATCHED) {
+                try { awaitCancellation() } finally { conn.disconnect() }
             }
             try {
                 if (body != null) conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
@@ -79,9 +88,11 @@ class SmartThingsRepository(
                 record(method, url, code, started, null)
                 if (text.isBlank() || !text.trimStart().startsWith("{")) JSONObject() else JSONObject(text)
             } catch (e: IOException) {
+                ensureActive() // cancelada de propósito: não é falta de internet
                 record(method, url, -1, started, e.javaClass.simpleName + ": " + e.message)
                 throw ApiException(-1, "Sem conexão com a SmartThings. Verifique a internet.")
             } finally {
+                guard.cancel()
                 conn.disconnect()
             }
         }

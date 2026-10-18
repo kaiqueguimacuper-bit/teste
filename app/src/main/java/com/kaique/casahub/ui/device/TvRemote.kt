@@ -101,9 +101,16 @@ import kotlin.math.roundToInt
  * [pressed] recebe true/false para o realce visual.
  */
 @Composable
-fun Modifier.repeatPress(enabled: Boolean = true, repeat: Boolean = true, onPress: () -> Unit, pressed: (Boolean) -> Unit = {}): Modifier {
+fun Modifier.repeatPress(
+    enabled: Boolean = true,
+    repeat: Boolean = true,
+    onPress: () -> Unit,
+    pressed: (Boolean) -> Unit = {},
+    onRepeat: (() -> Unit)? = null,
+): Modifier {
     val scope = rememberCoroutineScope()
     val action by rememberUpdatedState(onPress)
+    val repeatAction by rememberUpdatedState(onRepeat ?: onPress)
     val setPressed by rememberUpdatedState(pressed)
     return this.pointerInput(enabled, repeat) {
         if (!enabled) return@pointerInput
@@ -116,14 +123,18 @@ fun Modifier.repeatPress(enabled: Boolean = true, repeat: Boolean = true, onPres
                 job = scope.launch {
                     delay(450)
                     while (true) {
-                        action()
+                        repeatAction()
                         delay(260)
                     }
                 }
             }
-            waitForUpOrCancellation()
-            job?.cancel()
-            setPressed(false)
+            try {
+                waitForUpOrCancellation()
+            } finally {
+                // Sempre para a repetição, mesmo se o gesto for interrompido (tela recomposta, app em segundo plano).
+                job?.cancel()
+                setPressed(false)
+            }
         }
     }
 }
@@ -143,9 +154,9 @@ fun TvRemote(device: Device, store: HomeStore) {
         tick()
         store.fire(device, cmd, coalesce, optimistic)
     }
-    fun key(k: RemoteKey) {
+    fun key(k: RemoteKey, repeat: Boolean = false) {
         tick()
-        store.pressKey(device, k, coalesce = true)
+        store.pressKey(device, k, coalesce = repeat)
     }
 
     Column(
@@ -207,7 +218,7 @@ fun TvRemote(device: Device, store: HomeStore) {
 
         // Direcional
         Box(Modifier.alpha(if (ready) 1f else 0.45f)) {
-            DPad(enabled = hasKeys && ready, onKey = ::key)
+            DPad(enabled = hasKeys && ready, onKey = { k, rep -> key(k, rep) })
         }
         if (!hasKeys && !offline) {
             Text(
@@ -232,8 +243,8 @@ fun TvRemote(device: Device, store: HomeStore) {
             Rocker(
                 label = "VOL",
                 enabled = ready && device.has(Caps.VOLUME),
-                onUp = { send(TvCommands.volumeUp(device), coalesce = true) { it.copy(volume = ((it.volume ?: 0) + 1).coerceAtMost(100), muted = false) } },
-                onDown = { send(TvCommands.volumeDown(device), coalesce = true) { it.copy(volume = ((it.volume ?: 0) - 1).coerceAtLeast(0)) } },
+                onUp = { rep -> send(TvCommands.volumeUp(device), coalesce = rep) { it.copy(volume = ((it.volume ?: 0) + 1).coerceAtMost(100), muted = false) } },
+                onDown = { rep -> send(TvCommands.volumeDown(device), coalesce = rep) { it.copy(volume = ((it.volume ?: 0) - 1).coerceAtLeast(0)) } },
                 upIcon = Icons.Rounded.Add,
                 downIcon = Icons.Rounded.Remove,
             )
@@ -248,8 +259,8 @@ fun TvRemote(device: Device, store: HomeStore) {
             Rocker(
                 label = "CH",
                 enabled = ready && device.has(Caps.CHANNEL),
-                onUp = { send(TvCommands.channelUp(device), coalesce = true) },
-                onDown = { send(TvCommands.channelDown(device), coalesce = true) },
+                onUp = { rep -> send(TvCommands.channelUp(device), coalesce = rep) },
+                onDown = { rep -> send(TvCommands.channelDown(device), coalesce = rep) },
                 upIcon = Icons.Rounded.KeyboardArrowUp,
                 downIcon = Icons.Rounded.KeyboardArrowDown,
             )
@@ -348,7 +359,7 @@ private fun LabeledButton(label: String, content: @Composable () -> Unit) {
 
 /** Direcional circular com OK no centro. */
 @Composable
-private fun DPad(enabled: Boolean, onKey: (RemoteKey) -> Unit) {
+private fun DPad(enabled: Boolean, onKey: (RemoteKey, Boolean) -> Unit) {
     var pressed by remember { mutableStateOf<RemoteKey?>(null) }
     Box(
         Modifier
@@ -378,14 +389,14 @@ private fun DPad(enabled: Boolean, onKey: (RemoteKey) -> Unit) {
         }
         val zone = Modifier.size(width = 104.dp, height = 84.dp)
         Arrow(Icons.Rounded.KeyboardArrowUp, "Cima", zone.align(Alignment.TopCenter), enabled, pressed == RemoteKey.UP,
-            { onKey(RemoteKey.UP) }) { pressed = if (it) RemoteKey.UP else null }
+            { rep -> onKey(RemoteKey.UP, rep) }) { pressed = if (it) RemoteKey.UP else null }
         Arrow(Icons.Rounded.KeyboardArrowDown, "Baixo", zone.align(Alignment.BottomCenter), enabled, pressed == RemoteKey.DOWN,
-            { onKey(RemoteKey.DOWN) }) { pressed = if (it) RemoteKey.DOWN else null }
+            { rep -> onKey(RemoteKey.DOWN, rep) }) { pressed = if (it) RemoteKey.DOWN else null }
         val side = Modifier.size(width = 84.dp, height = 104.dp)
         Arrow(Icons.Rounded.KeyboardArrowLeft, "Esquerda", side.align(Alignment.CenterStart), enabled, pressed == RemoteKey.LEFT,
-            { onKey(RemoteKey.LEFT) }) { pressed = if (it) RemoteKey.LEFT else null }
+            { rep -> onKey(RemoteKey.LEFT, rep) }) { pressed = if (it) RemoteKey.LEFT else null }
         Arrow(Icons.Rounded.KeyboardArrowRight, "Direita", side.align(Alignment.CenterEnd), enabled, pressed == RemoteKey.RIGHT,
-            { onKey(RemoteKey.RIGHT) }) { pressed = if (it) RemoteKey.RIGHT else null }
+            { rep -> onKey(RemoteKey.RIGHT, rep) }) { pressed = if (it) RemoteKey.RIGHT else null }
 
         // OK
         var okDown by remember { mutableStateOf(false) }
@@ -395,7 +406,7 @@ private fun DPad(enabled: Boolean, onKey: (RemoteKey) -> Unit) {
                 .scale(if (okDown) 0.94f else 1f)
                 .clip(CircleShape)
                 .background(Brush.linearGradient(listOf(Palette.Accent, Palette.AccentDeep)))
-                .repeatPress(enabled = enabled, repeat = false, onPress = { onKey(RemoteKey.OK) }, pressed = { okDown = it }),
+                .repeatPress(enabled = enabled, repeat = false, onPress = { onKey(RemoteKey.OK, false) }, pressed = { okDown = it }),
             contentAlignment = Alignment.Center,
         ) {
             Text("OK", fontFamily = Display, fontWeight = FontWeight.SemiBold, fontSize = 26.sp, color = Palette.Bg)
@@ -410,11 +421,11 @@ private fun Arrow(
     modifier: Modifier,
     enabled: Boolean,
     active: Boolean,
-    onPress: () -> Unit,
+    onPress: (Boolean) -> Unit,
     onPressed: (Boolean) -> Unit,
 ) {
     Box(
-        modifier.repeatPress(enabled = enabled, onPress = onPress, pressed = onPressed),
+        modifier.repeatPress(enabled = enabled, onPress = { onPress(false) }, pressed = onPressed, onRepeat = { onPress(true) }),
         contentAlignment = Alignment.Center,
     ) {
         Icon(icon, description, tint = if (active) Palette.Accent else Palette.Text, modifier = Modifier.size(40.dp))
@@ -423,7 +434,7 @@ private fun Arrow(
 
 /** Tecla dupla vertical (volume/canal) que repete ao segurar. */
 @Composable
-private fun Rocker(label: String, enabled: Boolean, onUp: () -> Unit, onDown: () -> Unit, upIcon: ImageVector, downIcon: ImageVector) {
+private fun Rocker(label: String, enabled: Boolean, onUp: (Boolean) -> Unit, onDown: (Boolean) -> Unit, upIcon: ImageVector, downIcon: ImageVector) {
     var upDown by remember { mutableStateOf(false) }
     var downDown by remember { mutableStateOf(false) }
     Column(
@@ -439,14 +450,14 @@ private fun Rocker(label: String, enabled: Boolean, onUp: () -> Unit, onDown: ()
         Box(
             Modifier.fillMaxWidth().weight(1f)
                 .background(if (upDown) Palette.Surface3 else Color.Transparent)
-                .repeatPress(enabled = enabled, onPress = onUp, pressed = { upDown = it }),
+                .repeatPress(enabled = enabled, onPress = { onUp(false) }, pressed = { upDown = it }, onRepeat = { onUp(true) }),
             contentAlignment = Alignment.Center,
         ) { Icon(upIcon, "$label mais", tint = Palette.Text, modifier = Modifier.size(30.dp)) }
         Text(label, style = MaterialTheme.typography.labelSmall, color = Palette.Muted)
         Box(
             Modifier.fillMaxWidth().weight(1f)
                 .background(if (downDown) Palette.Surface3 else Color.Transparent)
-                .repeatPress(enabled = enabled, onPress = onDown, pressed = { downDown = it }),
+                .repeatPress(enabled = enabled, onPress = { onDown(false) }, pressed = { downDown = it }, onRepeat = { onDown(true) }),
             contentAlignment = Alignment.Center,
         ) { Icon(downIcon, "$label menos", tint = Palette.Text, modifier = Modifier.size(30.dp)) }
     }

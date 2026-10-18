@@ -350,9 +350,12 @@ fun LockControl(device: Device, store: HomeStore) {
                             done = true
                             act()
                         }
-                        waitForUpOrCancellation()
-                        if (!done) job.cancel()
-                        scope.launch { progress.animateTo(0f, tween(250)) }
+                        try {
+                            waitForUpOrCancellation()
+                        } finally {
+                            if (!done) job.cancel()
+                            scope.launch { progress.animateTo(0f, tween(250)) }
+                        }
                     }
                 },
             contentAlignment = Alignment.Center,

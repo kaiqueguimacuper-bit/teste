@@ -2,6 +2,8 @@ package com.kaique.casahub.data
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -90,6 +92,9 @@ data class UiState(
     val avgTemperature: Double?
         get() = devices.mapNotNull { it.state.temperature }.takeIf { it.isNotEmpty() }?.average()
 }
+
+private const val COMMAND_TIMEOUT_MS = 9_000L
+private const val MAX_QUEUE = 4
 
 /** Favoritos iniciais do modo demo, para a tela Início já mostrar o essencial. */
 val DEMO_FAVORITES = setOf("d3", "d1", "d4", "d7")
@@ -284,6 +289,18 @@ class HomeStore(
     private fun queue(id: String) = synchronized(queues) { queues.getOrPut(id) { Mutex() } }
 
     /**
+     * Controla a fila: repetições automáticas (dedo segurando) são descartadas se já houver
+     * comando esperando; toques normais entram até um limite, para a fila nunca crescer sem fim.
+     */
+    private fun admit(id: String, coalesce: Boolean): Boolean = synchronized(waiting) {
+        val n = waiting[id] ?: 0
+        if (coalesce && n >= 1) return false
+        if (n >= MAX_QUEUE) return false
+        waiting[id] = n + 1
+        true
+    }
+
+    /**
      * Comando rápido (teclas, volume, canal): entra numa fila por aparelho, para chegar na
      * ordem certa e sem atropelar a SmartThings. Com [coalesce], toques repetidos enquanto
      * a fila está cheia são descartados (segurar o volume não acumula atraso).
@@ -304,18 +321,18 @@ class HomeStore(
             _state.update { it.copy(message = "${device.name} está sem conexão. Ligue o aparelho e tente de novo.") }
             return
         }
-        if (coalesce && synchronized(waiting) { (waiting[device.id] ?: 0) >= 2 }) return
-        synchronized(waiting) { waiting[device.id] = (waiting[device.id] ?: 0) + 1 }
+        if (!admit(device.id, coalesce)) return
         val before = _state.value.devices.firstOrNull { it.id == device.id }?.state ?: device.state
         if (optimistic != null) setDeviceState(device.id, optimistic(before))
         scope.launch {
             try {
-                queue(device.id).withLock { r.command(device.id, cmd) }
+                queue(device.id).withLock { withTimeout(COMMAND_TIMEOUT_MS) { r.command(device.id, cmd) } }
                 if (TvCommands.isRelative(cmd)) scheduleSync(device)
             } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (e is kotlinx.coroutines.CancellationException && e !is TimeoutCancellationException) throw e
                 if (optimistic != null) setDeviceState(device.id, before)
-                _state.update { it.copy(message = e.message ?: "Não foi possível enviar o comando.") }
+                val msg = if (e is TimeoutCancellationException) "A SmartThings demorou para responder. Tente de novo." else e.message
+                _state.update { it.copy(message = msg ?: "Não foi possível enviar o comando.") }
                 scheduleSync(device)
             } finally {
                 synchronized(waiting) { waiting[device.id] = ((waiting[device.id] ?: 1) - 1).coerceAtLeast(0) }
@@ -334,8 +351,7 @@ class HomeStore(
             _state.update { it.copy(message = "${device.name} está sem conexão. Ligue a TV e tente de novo.") }
             return
         }
-        if (coalesce && synchronized(waiting) { (waiting[device.id] ?: 0) >= 2 }) return
-        synchronized(waiting) { waiting[device.id] = (waiting[device.id] ?: 0) + 1 }
+        if (!admit(device.id, coalesce)) return
         scope.launch {
             try {
                 queue(device.id).withLock {
@@ -343,19 +359,20 @@ class HomeStore(
                     val cmd = TvCommands.key(device, key, keyNames[device.id]?.get(key), preferKeypad = keypad)
                         ?: throw ApiException(0, "Esta TV não recebe teclas de navegação pela SmartThings.")
                     try {
-                        r.command(device.id, cmd)
+                        withTimeout(COMMAND_TIMEOUT_MS) { r.command(device.id, cmd) }
                     } catch (e: ApiException) {
                         // Plano B: se a TV recusar o samsungvd.remoteControl, tenta o keypadInput.
                         val canFallback = !keypad && cmd.capability == Caps.REMOTE && device.has(Caps.KEYPAD) &&
                             e.code in setOf(400, 403, 404, 422)
                         if (!canFallback) throw e
-                        r.command(device.id, TvCommands.key(device, key, preferKeypad = true)!!)
+                        withTimeout(COMMAND_TIMEOUT_MS) { r.command(device.id, TvCommands.key(device, key, preferKeypad = true)!!) }
                         useKeypad += device.id
                     }
                 }
             } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                _state.update { it.copy(message = e.message ?: "A TV não recebeu a tecla.") }
+                if (e is kotlinx.coroutines.CancellationException && e !is TimeoutCancellationException) throw e
+                val msg = if (e is TimeoutCancellationException) "A TV demorou para responder. Tente de novo." else e.message
+                _state.update { it.copy(message = msg ?: "A TV não recebeu a tecla.") }
             } finally {
                 synchronized(waiting) { waiting[device.id] = ((waiting[device.id] ?: 1) - 1).coerceAtLeast(0) }
             }
@@ -370,6 +387,7 @@ class HomeStore(
         val r = repo ?: return
         focusedId = device.id
         scheduleSync(device, delayMs = 0)
+        refreshInBackground(device)
         if (device.has(Caps.REMOTE) && device.id !in keyNames) {
             scope.launch {
                 val accepted = runCatching {
@@ -381,24 +399,40 @@ class HomeStore(
         }
     }
 
-    /** Relê o estado real do aparelho pouco depois do último comando (com "refresh" antes, se houver). */
-    private fun scheduleSync(device: Device, delayMs: Long = settleDelayMs + 300) {
+    /**
+     * Relê o estado real do aparelho pouco depois do último comando.
+     * Só faz leitura (GET): nunca segura a fila de comandos, então as teclas não esperam por ela.
+     */
+    private fun scheduleSync(device: Device, delayMs: Long = settleDelayMs + 600) {
         val r = repo ?: return
         synchronized(syncJobs) {
             syncJobs[device.id]?.cancel()
             syncJobs[device.id] = scope.launch {
                 delay(delayMs)
-                if (device.has(Caps.REFRESH)) {
-                    runCatching { queue(device.id).withLock { r.refreshDevice(device.id, device.componentFor(Caps.REFRESH)) } }
-                    delay(700)
-                }
                 val fresh = runCatching { r.status(device.id) }.getOrNull() ?: return@launch
-                if (device.id !in _state.value.pending) {
-                    val cur = _state.value.devices.firstOrNull { it.id == device.id }?.state
-                    setDeviceState(device.id, fresh.copy(online = fresh.online ?: cur?.online))
-                    synchronized(syncedAt) { syncedAt[device.id] = System.currentTimeMillis() }
-                }
+                applyFresh(device.id, fresh)
             }
+        }
+    }
+
+    private fun applyFresh(id: String, fresh: DeviceState) {
+        if (id in _state.value.pending) return
+        // Se o usuário mandou comandos depois que a leitura começou, ela já está velha: descarta.
+        if (synchronized(waiting) { (waiting[id] ?: 0) > 0 }) return
+        val cur = _state.value.devices.firstOrNull { it.id == id }?.state
+        setDeviceState(id, fresh.copy(online = fresh.online ?: cur?.online))
+        synchronized(syncedAt) { syncedAt[id] = System.currentTimeMillis() }
+    }
+
+    /** "refresh" faz a TV reenviar volume/canal à nuvem. Roda à parte, fora da fila, uma vez ao abrir. */
+    private fun refreshInBackground(device: Device) {
+        val r = repo ?: return
+        if (!device.has(Caps.REFRESH)) return
+        scope.launch {
+            val ok = runCatching {
+                withTimeout(8_000) { r.refreshDevice(device.id, device.componentFor(Caps.REFRESH)) }
+            }.isSuccess
+            if (ok) scheduleSync(device, delayMs = 1_200)
         }
     }
 
