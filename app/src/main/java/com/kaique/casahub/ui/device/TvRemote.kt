@@ -82,6 +82,8 @@ import com.kaique.casahub.data.Command
 import com.kaique.casahub.data.Device
 import com.kaique.casahub.data.HomeStore
 import com.kaique.casahub.data.Labels
+import com.kaique.casahub.data.LocalLink
+import com.kaique.casahub.data.LocalState
 import com.kaique.casahub.data.RemoteKey
 import com.kaique.casahub.data.TvApp
 import com.kaique.casahub.data.TvCommands
@@ -140,11 +142,13 @@ fun Modifier.repeatPress(
 }
 
 @Composable
-fun TvRemote(device: Device, store: HomeStore) {
+fun TvRemote(device: Device, store: HomeStore, link: LocalLink? = null) {
     val tick = rememberTick()
     val s = device.state
     val on = s.switchOn != false
-    val offline = s.online == false
+    val direct = link?.state == LocalState.CONNECTED
+    // Pelo Wi-Fi a TV responde mesmo quando a nuvem diz que ela está offline.
+    val offline = s.online == false && !direct
     val ready = !offline
     val hasKeys = device.has(Caps.REMOTE) || device.has(Caps.KEYPAD)
     var showSources by rememberSaveable { mutableStateOf(false) }
@@ -166,6 +170,7 @@ fun TvRemote(device: Device, store: HomeStore) {
     ) {
         // O que está passando
         NowPlaying(device)
+        DirectLinkBar(device, store, link)
 
         // Linha superior: energia, fonte, mudo, teclado
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
@@ -213,7 +218,7 @@ fun TvRemote(device: Device, store: HomeStore) {
         }
 
         AnimatedVisibility(showKeypad, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-            Keypad(device, onSend = { cmd, opt -> send(cmd, optimistic = opt) }, onDone = { showKeypad = false })
+            Keypad(device, direct, store, onSend = { cmd, opt -> send(cmd, optimistic = opt) }, onDone = { showKeypad = false })
         }
 
         // Direcional
@@ -506,10 +511,13 @@ private fun AppTile(app: TvApp, modifier: Modifier, enabled: Boolean, onClick: (
 @Composable
 private fun Keypad(
     device: Device,
+    direct: Boolean,
+    store: HomeStore,
     onSend: (Command?, ((com.kaique.casahub.data.DeviceState) -> com.kaique.casahub.data.DeviceState)?) -> Unit,
     onDone: () -> Unit,
 ) {
-    val byChannel = device.has(Caps.CHANNEL)
+    // Pelo Wi-Fi cada número vai na hora, como num controle de verdade; pela nuvem digita o canal e envia.
+    val byChannel = device.has(Caps.CHANNEL) && !direct
     var typed by rememberSaveable { mutableStateOf("") }
     Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(Palette.Surface).padding(16.dp),
@@ -543,9 +551,9 @@ private fun Keypad(
                                             onDone()
                                         }
                                     }
-                                    k == "OK" -> { onSend(TvCommands.key(device, RemoteKey.OK), null); onDone() }
+                                    k == "OK" -> { store.pressKey(device, RemoteKey.OK); onDone() }
                                     byChannel -> if (typed.length < 4) typed += k
-                                    else -> onSend(TvCommands.number(device, k.toInt()), null)
+                                    else -> store.pressNumber(device, k.toInt())
                                 }
                             },
                         contentAlignment = Alignment.Center,
@@ -558,3 +566,72 @@ private fun Keypad(
     }
 }
 
+
+/** Faixa de conexão direta pelo Wi-Fi: mostra o estado e conecta/pareia a TV. */
+@Composable
+private fun DirectLinkBar(device: Device, store: HomeStore, link: LocalLink?) {
+    val st = link?.state ?: LocalState.IDLE
+    val scanning = link?.scanning == true
+    val (dot, title, sub) = when {
+        scanning -> Triple(Palette.Accent, "Procurando a TV no Wi-Fi…", "Leva poucos segundos")
+        st == LocalState.CONNECTED -> Triple(Palette.Green, "Conectado direto pelo Wi-Fi", "Resposta instantânea" + (link?.name?.let { " · $it" } ?: ""))
+        st == LocalState.WAITING_APPROVAL -> Triple(Palette.Amber, "Aceite o pedido na TV", "Escolha \"Permitir\" para o CasaHub com o controle físico")
+        st == LocalState.CONNECTING -> Triple(Palette.Accent, "Conectando à TV…", link?.ip ?: "")
+        st == LocalState.DENIED -> Triple(Palette.Coral, "A TV recusou a conexão", "Libere o CasaHub em Configurações › Geral › Gerenciador de dispositivos externos")
+        st == LocalState.UNREACHABLE -> Triple(Palette.Coral, "TV não encontrada no Wi-Fi", "Usando a nuvem. Confira se a TV está ligada e na mesma rede")
+        else -> Triple(Palette.Faint, "Usando a nuvem SmartThings", "Conecte direto pelo Wi-Fi para resposta instantânea")
+    }
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Palette.Surface)
+            .border(1.dp, if (st == LocalState.CONNECTED) Palette.Green.copy(alpha = 0.35f) else Palette.Outline.copy(alpha = 0.6f), RoundedCornerShape(24.dp))
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (scanning || st == LocalState.CONNECTING) {
+                androidx.compose.material3.CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = dot)
+            } else {
+                Box(Modifier.size(10.dp).clip(CircleShape).background(dot))
+            }
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                if (sub.isNotBlank()) Text(sub, style = MaterialTheme.typography.bodySmall, color = Palette.Muted)
+            }
+            Spacer(Modifier.width(8.dp))
+            val action: Pair<String, () -> Unit>? = when {
+                scanning || st == LocalState.CONNECTING || st == LocalState.WAITING_APPROVAL -> null
+                st == LocalState.CONNECTED -> "Desconectar" to { store.forgetLocal(device) }
+                st == LocalState.IDLE -> "Conectar" to { store.connectLocal(device) }
+                else -> "Tentar de novo" to { store.connectLocal(device) }
+            }
+            if (action != null) {
+                Box(
+                    Modifier.clip(RoundedCornerShape(50))
+                        .background(if (st == LocalState.CONNECTED) Palette.Surface2 else Palette.Accent)
+                        .clickable(onClick = action.second)
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                ) {
+                    Text(action.first, style = MaterialTheme.typography.labelLarge, color = if (st == LocalState.CONNECTED) Palette.Text else Palette.Bg)
+                }
+            }
+        }
+        val candidates = link?.candidates.orEmpty()
+        if (candidates.isNotEmpty()) {
+            Text("Encontrei mais de uma TV. Qual é esta?", style = MaterialTheme.typography.bodySmall, color = Palette.Muted)
+            candidates.forEach { tv ->
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Palette.Surface2)
+                        .clickable { store.pickLocal(device, tv) }.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tv.name, style = MaterialTheme.typography.titleSmall)
+                        Text(listOfNotNull(tv.model, tv.ip).joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = Palette.Muted)
+                    }
+                    Icon(Icons.Rounded.KeyboardArrowRight, null, tint = Palette.Muted)
+                }
+            }
+        }
+    }
+}

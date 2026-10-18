@@ -51,8 +51,8 @@ class SmartThingsRepository(
             val started = System.currentTimeMillis()
             val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod = method
-                connectTimeout = 7_000
-                readTimeout = if (method == "POST") 9_000 else 12_000
+                connectTimeout = 5_000
+                readTimeout = if (method == "POST") 6_000 else 10_000
                 setRequestProperty("Authorization", "Bearer $token")
                 setRequestProperty("Accept", "application/json")
                 if (body != null) {
@@ -62,8 +62,9 @@ class SmartThingsRepository(
             }
             // Se a chamada for cancelada (tempo esgotado, tela fechada), derruba a conexão na hora:
             // sem isso a leitura bloqueada seguraria a fila de comandos até o timeout do socket.
+            val finished = java.util.concurrent.atomic.AtomicBoolean(false)
             val guard = launch(start = CoroutineStart.UNDISPATCHED) {
-                try { awaitCancellation() } finally { conn.disconnect() }
+                try { awaitCancellation() } finally { if (!finished.get()) conn.disconnect() }
             }
             try {
                 if (body != null) conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
@@ -88,12 +89,15 @@ class SmartThingsRepository(
                 record(method, url, code, started, null)
                 if (text.isBlank() || !text.trimStart().startsWith("{")) JSONObject() else JSONObject(text)
             } catch (e: IOException) {
+                conn.disconnect()
                 ensureActive() // cancelada de propósito: não é falta de internet
                 record(method, url, -1, started, e.javaClass.simpleName + ": " + e.message)
                 throw ApiException(-1, "Sem conexão com a SmartThings. Verifique a internet.")
             } finally {
+                // Sem disconnect() aqui: a conexão volta para o pool e o próximo comando
+                // reaproveita o mesmo canal seguro (sem novo aperto de mão TLS = bem mais rápido).
+                finished.set(true)
                 guard.cancel()
-                conn.disconnect()
             }
         }
 

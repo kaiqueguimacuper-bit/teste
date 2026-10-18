@@ -49,7 +49,8 @@ import com.kaique.casahub.ui.theme.kindColor
 fun DeviceScreen(device: Device, state: UiState, store: HomeStore, onBack: () -> Unit) {
     val tick = rememberTick()
     val accent = kindColor(device.kind)
-    val offline = device.state.online == false
+    // Conectada direto pelo Wi-Fi, a TV funciona mesmo se a nuvem disser que está offline.
+    val offline = device.state.online == false && state.local[device.id]?.state != com.kaique.casahub.data.LocalState.CONNECTED
     val active = device.isActive && !offline
     val favorite = device.id in state.favorites
     val pending = device.id in state.pending
@@ -119,7 +120,7 @@ fun DeviceScreen(device: Device, state: UiState, store: HomeStore, onBack: () ->
             }
 
             when (device.kind) {
-                DeviceKind.TV -> TvRemote(device, store)
+                DeviceKind.TV -> TvRemote(device, store, state.local[device.id])
                 DeviceKind.LIGHT -> LightControl(device, store)
                 DeviceKind.AC, DeviceKind.THERMOSTAT -> ClimateControl(device, store)
                 DeviceKind.LOCK -> LockControl(device, store)

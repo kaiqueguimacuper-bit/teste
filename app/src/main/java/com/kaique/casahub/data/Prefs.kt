@@ -26,6 +26,22 @@ class Prefs(context: Context) : Settings {
         get() = sp.getBoolean("autoRefresh", true)
         set(v) = sp.edit().putBoolean("autoRefresh", v).apply()
 
+    override fun localTv(deviceId: String): LocalTvInfo? {
+        val ip = sp.getString("ltv_ip_$deviceId", null) ?: return null
+        return LocalTvInfo(ip, sp.getString("ltv_token_$deviceId", null), sp.getString("ltv_mac_$deviceId", null), sp.getString("ltv_name_$deviceId", null))
+    }
+
+    override fun saveLocalTv(deviceId: String, info: LocalTvInfo?) {
+        val e = sp.edit()
+        if (info == null) {
+            listOf("ip", "token", "mac", "name").forEach { e.remove("ltv_${it}_$deviceId") }
+        } else {
+            e.putString("ltv_ip_$deviceId", info.ip).putString("ltv_token_$deviceId", info.token)
+                .putString("ltv_mac_$deviceId", info.mac).putString("ltv_name_$deviceId", info.name)
+        }
+        e.apply()
+    }
+
     override fun clearSession() {
         sp.edit().remove("token").remove("demo").remove("location").apply()
     }

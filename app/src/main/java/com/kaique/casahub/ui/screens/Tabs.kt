@@ -483,7 +483,7 @@ fun SettingsTab(state: UiState, store: HomeStore) {
         }
         full("diag") { DiagnosticsPanel(state, store) }
         full("sobre") {
-            Text("CasaHub 2.2 · controle seus aparelhos SmartThings", style = MaterialTheme.typography.bodySmall, color = Palette.Faint, modifier = Modifier.padding(top = 8.dp))
+            Text("CasaHub 2.3 · controle seus aparelhos SmartThings", style = MaterialTheme.typography.bodySmall, color = Palette.Faint, modifier = Modifier.padding(top = 8.dp))
         }
     }
 }
@@ -497,7 +497,7 @@ private fun DiagnosticsPanel(state: UiState, store: HomeStore) {
     val tvs = state.devices.filter { it.kind == DeviceKind.TV }
 
     fun report(): String = buildString {
-        appendLine("CasaHub 2.2 — diagnóstico")
+        appendLine("CasaHub 2.3 — diagnóstico")
         appendLine("Modo: " + if (state.demo) "demo" else "SmartThings")
         tvs.forEach { tv ->
             appendLine("TV ${tv.name}: online=${tv.state.online} switch=${tv.state.switchOn} volume=${tv.state.volume}")

@@ -26,7 +26,23 @@ interface Settings {
     var favorites: Set<String>
     var autoRefresh: Boolean
     fun clearSession()
+
+    /** TV pareada pelo Wi-Fi (IP, token de autorização, MAC para ligar) por aparelho. */
+    fun localTv(deviceId: String): LocalTvInfo? = null
+    fun saveLocalTv(deviceId: String, info: LocalTvInfo?) {}
 }
+
+data class LocalTvInfo(val ip: String, val token: String? = null, val mac: String? = null, val name: String? = null)
+
+/** Situação do controle direto pelo Wi-Fi de uma TV, para a tela. */
+data class LocalLink(
+    val state: LocalState = LocalState.IDLE,
+    val ip: String? = null,
+    val name: String? = null,
+    val scanning: Boolean = false,
+    val candidates: List<FoundTv> = emptyList(),
+    val notFound: Boolean = false,
+)
 
 object RoomFilter {
     const val ALL = "__all"
@@ -54,6 +70,8 @@ data class UiState(
     val autoRefresh: Boolean = true,
     /** Teclas aceitas por cada TV (lidas da SmartThings), para o diagnóstico. */
     val remoteKeys: Map<String, List<String>> = emptyMap(),
+    /** Controle direto pelo Wi-Fi, por TV. */
+    val local: Map<String, LocalLink> = emptyMap(),
     val lastUpdated: Long = 0L,
 ) {
     val locationName: String get() = locations.firstOrNull { it.id == locationId }?.name ?: "Minha casa"
@@ -93,8 +111,9 @@ data class UiState(
         get() = devices.mapNotNull { it.state.temperature }.takeIf { it.isNotEmpty() }?.average()
 }
 
-private const val COMMAND_TIMEOUT_MS = 9_000L
-private const val MAX_QUEUE = 4
+private const val COMMAND_TIMEOUT_MS = 6_000L
+private const val MAX_QUEUE = 6
+private const val SEND_SPACING_MS = 90L
 
 /** Favoritos iniciais do modo demo, para a tela Início já mostrar o essencial. */
 val DEMO_FAVORITES = setOf("d3", "d1", "d4", "d7")
@@ -105,6 +124,11 @@ class HomeStore(
     private val realRepo: (String) -> HomeRepository = { SmartThingsRepository(it) },
     private val demoRepo: () -> HomeRepository = { DemoRepository() },
     private val settleDelayMs: Long = 900,
+    private val localFactory: (LocalTvInfo, (String) -> Unit) -> LocalTvRemote = { info, onToken ->
+        LocalTvRemote(info.ip, info.token, scope, onToken)
+    },
+    private val finder: suspend () -> List<FoundTv> = { LocalTvFinder.scan() },
+    private val waker: (String) -> Unit = { mac -> LocalTvFinder.wake(mac) },
 ) {
     private val _state = MutableStateFlow(UiState(favorites = settings.favorites, autoRefresh = settings.autoRefresh))
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -166,6 +190,8 @@ class HomeStore(
 
     fun logout() {
         loadJob?.cancel()
+        synchronized(locals) { locals.values.forEach { it.stop() }; locals.clear() }
+        localWatch.values.forEach { it.cancel() }; localWatch.clear()
         repo = null
         settings.clearSession()
         _state.value = UiState(favorites = settings.favorites, autoRefresh = settings.autoRefresh)
@@ -246,7 +272,77 @@ class HomeStore(
     /** Liga/desliga. Com [force], tenta mesmo se a SmartThings diz que o aparelho está offline (TV em espera). */
     fun toggle(device: Device, force: Boolean = false) {
         val on = device.state.switchOn ?: (if (force) device.state.online == true else return)
+        if (device.kind == DeviceKind.TV) {
+            val local = localFor(device.id)
+            if (on && local != null && local.send("KEY_POWER") { send(device, device.cmd(Caps.SWITCH, "off"), true) { it.copy(switchOn = false) } }) {
+                setDeviceState(device.id, (currentState(device)).copy(switchOn = false))
+                return
+            }
+            if (!on) settings.localTv(device.id)?.mac?.let { mac -> scope.launch(kotlinx.coroutines.Dispatchers.IO) { waker(mac) } }
+        }
         send(device, device.cmd(Caps.SWITCH, if (on) "off" else "on"), force) { it.copy(switchOn = !on) }
+    }
+
+    private fun currentState(device: Device) = _state.value.devices.firstOrNull { it.id == device.id }?.state ?: device.state
+
+    // ---------- Controle direto pelo Wi-Fi ----------
+
+    private val locals = mutableMapOf<String, LocalTvRemote>()
+    private val localWatch = mutableMapOf<String, Job>()
+    private val demoLocal = mutableSetOf<String>()
+
+    private fun localFor(id: String): LocalTvRemote? = synchronized(locals) { locals[id] }?.takeIf { it.isConnected }
+
+    private fun setLink(id: String, f: (LocalLink) -> LocalLink) =
+        _state.update { it.copy(local = it.local + (id to f(it.local[id] ?: LocalLink()))) }
+
+    private fun startLocal(device: Device, info: LocalTvInfo) {
+        synchronized(locals) { locals.remove(device.id) }?.stop()
+        localWatch.remove(device.id)?.cancel()
+        val remote = localFactory(info) { tok ->
+            settings.saveLocalTv(device.id, (settings.localTv(device.id) ?: info).copy(token = tok))
+        }
+        synchronized(locals) { locals[device.id] = remote }
+        setLink(device.id) { it.copy(ip = info.ip, name = info.name, state = LocalState.CONNECTING, candidates = emptyList(), notFound = false) }
+        localWatch[device.id] = scope.launch { remote.state.collect { st -> setLink(device.id) { it.copy(state = st) } } }
+        remote.start()
+    }
+
+    /** Procura a TV no Wi-Fi e conecta direto. Uma TV: conecta; várias: mostra a lista para escolher. */
+    fun connectLocal(device: Device) {
+        if (repo?.isDemo == true) {
+            demoLocal += device.id
+            setLink(device.id) { LocalLink(state = LocalState.CONNECTED, ip = "192.168.0.20", name = "Samsung (simulada)") }
+            return
+        }
+        setLink(device.id) { it.copy(scanning = true, notFound = false, candidates = emptyList()) }
+        scope.launch {
+            val found = runCatching { finder() }.getOrDefault(emptyList())
+            setLink(device.id) { it.copy(scanning = false) }
+            when (found.size) {
+                0 -> {
+                    setLink(device.id) { it.copy(notFound = true) }
+                    _state.update { it.copy(message = "Nenhuma TV Samsung encontrada neste Wi-Fi. O celular e a TV precisam estar na mesma rede.") }
+                }
+                1 -> pickLocal(device, found[0])
+                else -> setLink(device.id) { it.copy(candidates = found) }
+            }
+        }
+    }
+
+    fun pickLocal(device: Device, tv: FoundTv) {
+        val old = settings.localTv(device.id)
+        val info = LocalTvInfo(tv.ip, old?.token?.takeIf { old.ip == tv.ip }, tv.mac ?: old?.mac, tv.name)
+        settings.saveLocalTv(device.id, info)
+        startLocal(device, info)
+    }
+
+    fun forgetLocal(device: Device) {
+        synchronized(locals) { locals.remove(device.id) }?.stop()
+        localWatch.remove(device.id)?.cancel()
+        demoLocal -= device.id
+        settings.saveLocalTv(device.id, null)
+        _state.update { it.copy(local = it.local - device.id) }
     }
 
     fun send(device: Device, cmd: Command, force: Boolean = false, optimistic: (DeviceState) -> DeviceState) {
@@ -287,23 +383,52 @@ class HomeStore(
     fun deviceClosed() { focusedId = null }
 
     private fun queue(id: String) = synchronized(queues) { queues.getOrPut(id) { Mutex() } }
+    private val lastSentAt = mutableMapOf<String, Long>()
+    private val lastOkAt = mutableMapOf<String, Long>()
 
     /**
-     * Controla a fila: repetições automáticas (dedo segurando) são descartadas se já houver
-     * comando esperando; toques normais entram até um limite, para a fila nunca crescer sem fim.
+     * Espaça os envios do mesmo aparelho em [SEND_SPACING_MS] para chegarem na ordem,
+     * mas NÃO espera a resposta do anterior: um comando lento nunca segura os próximos.
+     */
+    private suspend fun paced(id: String) {
+        queue(id).withLock {
+            val wait = (lastSentAt[id] ?: 0L) + SEND_SPACING_MS - System.currentTimeMillis()
+            if (wait > 0) delay(wait)
+            lastSentAt[id] = System.currentTimeMillis()
+        }
+    }
+
+    /**
+     * Limita comandos em andamento por aparelho: repetições automáticas (dedo segurando) só
+     * entram se houver no máximo 1 a caminho; toques normais entram até [MAX_QUEUE].
      */
     private fun admit(id: String, coalesce: Boolean): Boolean = synchronized(waiting) {
         val n = waiting[id] ?: 0
-        if (coalesce && n >= 1) return false
+        if (coalesce && n >= 2) return false
         if (n >= MAX_QUEUE) return false
         waiting[id] = n + 1
         true
     }
 
+    private fun done(id: String, ok: Boolean) {
+        synchronized(waiting) {
+            waiting[id] = ((waiting[id] ?: 1) - 1).coerceAtLeast(0)
+            if (ok) lastOkAt[id] = System.currentTimeMillis()
+        }
+    }
+
+    /** Mostra o erro só se nenhum comando mais novo do mesmo aparelho já funcionou (evita alarme falso). */
+    private fun reportError(id: String, startedAt: Long, e: Exception, fallback: String) {
+        val newerWorked = synchronized(waiting) { (lastOkAt[id] ?: 0L) > startedAt }
+        if (newerWorked) return
+        val msg = if (e is TimeoutCancellationException) "A TV demorou para responder. Tente de novo." else e.message
+        _state.update { it.copy(message = msg ?: fallback) }
+    }
+
     /**
-     * Comando rápido (teclas, volume, canal): entra numa fila por aparelho, para chegar na
-     * ordem certa e sem atropelar a SmartThings. Com [coalesce], toques repetidos enquanto
-     * a fila está cheia são descartados (segurar o volume não acumula atraso).
+     * Comando rápido (teclas, volume, canal): sai na hora, em paralelo, espaçado só o
+     * suficiente para manter a ordem. Com [coalesce], repetições de dedo segurando são
+     * descartadas se a TV ainda não respondeu às anteriores (não acumula atraso).
      * Depois de comandos de volume/canal/fonte o app relê o estado real do aparelho.
      */
     fun fire(
@@ -311,6 +436,28 @@ class HomeStore(
         cmd: Command?,
         coalesce: Boolean = false,
         optimistic: ((DeviceState) -> DeviceState)? = null,
+    ) {
+        // Pelo Wi-Fi: sai na hora, sem fila e sem nuvem. Se a conexão cair, vai pela nuvem sozinho.
+        val localKey = cmd?.let { LocalKeys.of(it) }
+        val local = localFor(device.id)
+        if (cmd != null && localKey != null && local != null) {
+            val before = currentState(device)
+            if (local.send(localKey) { cloudFire(device, cmd, false, optimistic, before) }) {
+                if (optimistic != null) setDeviceState(device.id, optimistic(before))
+                synchronized(waiting) { lastOkAt[device.id] = System.currentTimeMillis() }
+                if (TvCommands.isRelative(cmd)) scheduleSync(device, delayMs = 1_500)
+                return
+            }
+        }
+        cloudFire(device, cmd, coalesce, optimistic, null)
+    }
+
+    private fun cloudFire(
+        device: Device,
+        cmd: Command?,
+        coalesce: Boolean,
+        optimistic: ((DeviceState) -> DeviceState)?,
+        alreadyApplied: DeviceState?,
     ) {
         val r = repo ?: return
         if (cmd == null) {
@@ -322,26 +469,45 @@ class HomeStore(
             return
         }
         if (!admit(device.id, coalesce)) return
-        val before = _state.value.devices.firstOrNull { it.id == device.id }?.state ?: device.state
-        if (optimistic != null) setDeviceState(device.id, optimistic(before))
+        val before = alreadyApplied ?: currentState(device)
+        if (optimistic != null && alreadyApplied == null) setDeviceState(device.id, optimistic(before))
+        val started = System.currentTimeMillis()
         scope.launch {
+            var ok = false
             try {
-                queue(device.id).withLock { withTimeout(COMMAND_TIMEOUT_MS) { r.command(device.id, cmd) } }
+                paced(device.id)
+                withTimeout(COMMAND_TIMEOUT_MS) { r.command(device.id, cmd) }
+                ok = true
                 if (TvCommands.isRelative(cmd)) scheduleSync(device)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException && e !is TimeoutCancellationException) throw e
-                if (optimistic != null) setDeviceState(device.id, before)
-                val msg = if (e is TimeoutCancellationException) "A SmartThings demorou para responder. Tente de novo." else e.message
-                _state.update { it.copy(message = msg ?: "Não foi possível enviar o comando.") }
+                if (optimistic != null && synchronized(waiting) { (lastOkAt[device.id] ?: 0L) <= started }) setDeviceState(device.id, before)
+                reportError(device.id, started, e, "Não foi possível enviar o comando.")
                 scheduleSync(device)
             } finally {
-                synchronized(waiting) { waiting[device.id] = ((waiting[device.id] ?: 1) - 1).coerceAtLeast(0) }
+                done(device.id, ok)
             }
         }
     }
 
     /** Envia uma tecla do controle no formato que a TV aceita, com plano B pelo keypadInput. */
     fun pressKey(device: Device, key: RemoteKey, coalesce: Boolean = false) {
+        val local = localFor(device.id)
+        if (local != null && local.send(LocalKeys.of(key)) { cloudKey(device, key, false) }) {
+            synchronized(waiting) { lastOkAt[device.id] = System.currentTimeMillis() }
+            return
+        }
+        cloudKey(device, key, coalesce)
+    }
+
+    /** Número do teclado: pelo Wi-Fi se conectado, senão pela nuvem (keypadInput). */
+    fun pressNumber(device: Device, n: Int) {
+        val local = localFor(device.id)
+        if (local != null && local.send("KEY_$n") { fire(device, TvCommands.number(device, n)) }) return
+        fire(device, TvCommands.number(device, n))
+    }
+
+    private fun cloudKey(device: Device, key: RemoteKey, coalesce: Boolean) {
         val r = repo ?: return
         if (!device.has(Caps.REMOTE) && !device.has(Caps.KEYPAD)) {
             _state.update { it.copy(message = "Esta TV não recebe teclas de navegação pela SmartThings.") }
@@ -352,29 +518,30 @@ class HomeStore(
             return
         }
         if (!admit(device.id, coalesce)) return
+        val started = System.currentTimeMillis()
         scope.launch {
+            var ok = false
             try {
-                queue(device.id).withLock {
-                    val keypad = device.id in useKeypad
-                    val cmd = TvCommands.key(device, key, keyNames[device.id]?.get(key), preferKeypad = keypad)
-                        ?: throw ApiException(0, "Esta TV não recebe teclas de navegação pela SmartThings.")
-                    try {
-                        withTimeout(COMMAND_TIMEOUT_MS) { r.command(device.id, cmd) }
-                    } catch (e: ApiException) {
-                        // Plano B: se a TV recusar o samsungvd.remoteControl, tenta o keypadInput.
-                        val canFallback = !keypad && cmd.capability == Caps.REMOTE && device.has(Caps.KEYPAD) &&
-                            e.code in setOf(400, 403, 404, 422)
-                        if (!canFallback) throw e
-                        withTimeout(COMMAND_TIMEOUT_MS) { r.command(device.id, TvCommands.key(device, key, preferKeypad = true)!!) }
-                        useKeypad += device.id
-                    }
+                paced(device.id)
+                val keypad = device.id in useKeypad
+                val cmd = TvCommands.key(device, key, keyNames[device.id]?.get(key), preferKeypad = keypad)
+                    ?: throw ApiException(0, "Esta TV não recebe teclas de navegação pela SmartThings.")
+                try {
+                    withTimeout(COMMAND_TIMEOUT_MS) { r.command(device.id, cmd) }
+                } catch (e: ApiException) {
+                    // Plano B: se a TV recusar o samsungvd.remoteControl, tenta o keypadInput.
+                    val canFallback = !keypad && cmd.capability == Caps.REMOTE && device.has(Caps.KEYPAD) &&
+                        e.code in setOf(400, 403, 404, 422)
+                    if (!canFallback) throw e
+                    withTimeout(COMMAND_TIMEOUT_MS) { r.command(device.id, TvCommands.key(device, key, preferKeypad = true)!!) }
+                    useKeypad += device.id
                 }
+                ok = true
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException && e !is TimeoutCancellationException) throw e
-                val msg = if (e is TimeoutCancellationException) "A TV demorou para responder. Tente de novo." else e.message
-                _state.update { it.copy(message = msg ?: "A TV não recebeu a tecla.") }
+                reportError(device.id, started, e, "A TV não recebeu a tecla.")
             } finally {
-                synchronized(waiting) { waiting[device.id] = ((waiting[device.id] ?: 1) - 1).coerceAtLeast(0) }
+                done(device.id, ok)
             }
         }
     }
@@ -388,6 +555,9 @@ class HomeStore(
         focusedId = device.id
         scheduleSync(device, delayMs = 0)
         refreshInBackground(device)
+        if (device.kind == DeviceKind.TV && synchronized(locals) { locals[device.id] } == null) {
+            settings.localTv(device.id)?.let { startLocal(device, it) }
+        }
         if (device.has(Caps.REMOTE) && device.id !in keyNames) {
             scope.launch {
                 val accepted = runCatching {
