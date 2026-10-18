@@ -13,6 +13,8 @@ import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -300,13 +302,15 @@ fun ClimateControl(device: Device, store: HomeStore) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ChipGroup(title: String, options: List<Pair<String, String>>, selected: String?, color: Color, enabled: Boolean, onPick: (String) -> Unit) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Eyebrow(title)
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).alpha(if (enabled) 1f else 0.5f),
+        FlowRow(
+            Modifier.fillMaxWidth().alpha(if (enabled) 1f else 0.5f),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             options.forEach { (id, label) ->
                 OptionChip(label, selected = id == selected, color = color, onClick = { if (enabled) onPick(id) })
