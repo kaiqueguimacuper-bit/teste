@@ -4,25 +4,35 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
-
       - uses: gradle/actions/setup-gradle@v4
 
+      # O runner do GitHub já vem com o Android SDK (ANDROID_HOME).
       - name: Compilar
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon assembleDebug assembleRelease
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          set -o pipefail
+          ./gradlew --no-daemon assembleDebug assembleRelease 2>&1 | tee build.log
+
+      - name: Mostrar erros de compilação
+        if: failure()
+        run: |
+          grep -E "^e: |error:|What went wrong|Could not|> " build.log | head -40 | while IFS= read -r l; do echo "::error::$l"; done
+          tail -25 build.log | while IFS= read -r l; do echo "::warning::$l"; done
 
       - name: Renomear APKs
         run: |
@@ -34,3 +44,14 @@ jobs:
         with:
           name: CasaHub-apk
           path: saida/*.apk
+
+      # Publica o APK numa página de Release, com link fixo para baixar no celular.
+      - name: Publicar release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="build-${{ github.run_number }}"
+          gh release create "$TAG" saida/CasaHub.apk saida/CasaHub-debug.apk \
+            --title "CasaHub ${{ github.run_number }}" \
+            --notes "APK gerado automaticamente. Baixe CasaHub.apk no celular e instale." \
+            --latest
