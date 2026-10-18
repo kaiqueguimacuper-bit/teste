@@ -21,6 +21,12 @@ shot 03-aparelhos --es screen devices
 shot 04-cenas --es screen scenes
 shot 05-ajustes --es screen settings
 shot 06-controle-tv --es screen device:d3
+# Toques reais no controle: volume + duas vezes e abrir o teclado numérico
+adb shell input tap 156 2187; sleep 1; adb shell input tap 156 2187; sleep 2
+adb shell input tap 945 855; sleep 2
+adb exec-out screencap -p > shots/06b-controle-tv-teclado.png
+if [ -z "$(adb shell pidof $PKG)" ]; then echo "CRASH em 06b" >> shots/status.txt; else echo "ok 06b-toques" >> shots/status.txt; fi
+shot 06-controle-tv --es screen device:d3
 adb shell input swipe 540 1900 540 500 400; sleep 2
 adb exec-out screencap -p > shots/07-controle-tv-baixo.png
 shot 08-ar --es screen device:d4

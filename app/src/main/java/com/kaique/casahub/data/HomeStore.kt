@@ -87,6 +87,9 @@ data class UiState(
         get() = devices.mapNotNull { it.state.temperature }.takeIf { it.isNotEmpty() }?.average()
 }
 
+/** Favoritos iniciais do modo demo, para a tela Início já mostrar o essencial. */
+val DEMO_FAVORITES = setOf("d3", "d1", "d4", "d7")
+
 class HomeStore(
     private val scope: CoroutineScope,
     private val settings: Settings,
@@ -132,6 +135,10 @@ class HomeStore(
                 val locs = r.locations()
                 if (locs.isEmpty()) throw ApiException(0, "Nenhum local encontrado nessa conta SmartThings.")
                 repo = r
+                if (r.isDemo && settings.favorites.isEmpty()) {
+                    settings.favorites = DEMO_FAVORITES
+                    _state.update { it.copy(favorites = DEMO_FAVORITES) }
+                }
                 if (r.isDemo) settings.demo = true else if (saveToken != null) {
                     settings.token = saveToken; settings.demo = false
                 }

@@ -1,9 +1,11 @@
 package com.kaique.casahub.ui.theme
 
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
@@ -109,5 +111,8 @@ private val Scheme = darkColorScheme(
 
 @Composable
 fun CasaHubTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = Scheme, typography = AppTypography, content = content)
+    MaterialTheme(colorScheme = Scheme, typography = AppTypography) {
+        // Texto claro por padrão em todas as telas (o fundo é sempre escuro).
+        CompositionLocalProvider(LocalContentColor provides Palette.Text, content = content)
+    }
 }
