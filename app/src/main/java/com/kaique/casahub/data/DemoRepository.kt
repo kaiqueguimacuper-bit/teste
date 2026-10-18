@@ -22,10 +22,16 @@ class DemoRepository : HomeRepository {
             DeviceState(online = true, switchOn = true, level = 70, colorTemp = 3000)),
         Device("d2", "Fita LED da TV", "sala", setOf(Caps.SWITCH, Caps.LEVEL, Caps.COLOR), "Light",
             DeviceState(online = true, switchOn = false, level = 40, hue = 66.0, saturation = 90.0)),
-        Device("d3", "TV da sala", "sala", setOf(Caps.SWITCH, Caps.VOLUME, Caps.MUTE), "Television",
-            DeviceState(online = true, switchOn = false, volume = 18, muted = false)),
-        Device("d4", "Ar-condicionado", "quarto", setOf(Caps.SWITCH, Caps.TEMP, Caps.THERMOSTAT_COOL, Caps.THERMOSTAT_MODE), "AirConditioner",
-            DeviceState(online = true, switchOn = true, temperature = 26.0, tempUnit = "C", coolingSetpoint = 22.0, thermostatMode = "cool")),
+        Device("d3", "TV da sala", "sala",
+            setOf(Caps.SWITCH, Caps.VOLUME, Caps.MUTE, Caps.CHANNEL, Caps.REMOTE, Caps.KEYPAD, Caps.INPUT_SAMSUNG, Caps.PLAYBACK, Caps.LAUNCH),
+            "Television",
+            DeviceState(online = true, switchOn = true, volume = 18, muted = false, channel = "7", channelName = "Globo",
+                inputSource = "dtv", inputSources = listOf("dtv", "HDMI1", "HDMI2", "USB"), playback = "stopped")),
+        Device("d4", "Ar-condicionado", "quarto",
+            setOf(Caps.SWITCH, Caps.TEMP, Caps.THERMOSTAT_COOL, Caps.AC_MODE, Caps.AC_FAN, Caps.HUMIDITY), "AirConditioner",
+            DeviceState(online = true, switchOn = true, temperature = 26.0, tempUnit = "C", humidity = 54.0, coolingSetpoint = 22.0,
+                acMode = "cool", acModes = listOf("auto", "cool", "dry", "wind", "heat"),
+                fanMode = "auto", fanModes = listOf("auto", "low", "medium", "high", "turbo"))),
         Device("d5", "Abajur", "quarto", setOf(Caps.SWITCH, Caps.LEVEL), "Light",
             DeviceState(online = true, switchOn = false, level = 30)),
         Device("d6", "Cortina", "quarto", setOf(Caps.SHADE, Caps.SHADE_LEVEL), "Blind",
@@ -76,10 +82,25 @@ class DemoRepository : HomeRepository {
         update(deviceId) { s ->
             when ("${cmd.capability}.${cmd.command}") {
                 "switch.on" -> s.copy(switchOn = true, power = if (s.power != null) 850.0 else null)
+                "audioVolume.volumeUp" -> s.copy(volume = ((s.volume ?: 0) + 1).coerceAtMost(100), muted = false)
+                "audioVolume.volumeDown" -> s.copy(volume = ((s.volume ?: 0) - 1).coerceAtLeast(0))
+                "tvChannel.channelUp" -> s.copy(channel = ((s.channel?.toIntOrNull() ?: 0) + 1).toString(), channelName = null)
+                "tvChannel.channelDown" -> s.copy(channel = ((s.channel?.toIntOrNull() ?: 2) - 1).coerceAtLeast(1).toString(), channelName = null)
+                "tvChannel.setTvChannel" -> s.copy(channel = a0?.toString(), channelName = null, inputSource = "dtv")
+                "samsungvd.mediaInputSource.setInputSource", "mediaInputSource.setInputSource" -> s.copy(inputSource = a0?.toString())
+                "mediaPlayback.play" -> s.copy(playback = "playing")
+                "mediaPlayback.pause" -> s.copy(playback = "paused")
+                "mediaPlayback.stop" -> s.copy(playback = "stopped")
+                "custom.launchapp.launchApp" -> s.copy(playback = "playing", channelName = null)
+                "airConditionerMode.setAirConditionerMode" -> s.copy(acMode = a0?.toString(), switchOn = true)
+                "airConditionerFanMode.setFanMode" -> s.copy(fanMode = a0?.toString())
                 "switch.off" -> s.copy(switchOn = false, power = if (s.power != null) 0.0 else null)
                 "switchLevel.setLevel" -> s.copy(level = n?.toInt(), switchOn = (n ?: 0.0) > 0)
                 "colorTemperature.setColorTemperature" -> s.copy(colorTemp = n?.toInt())
                 "colorControl.setHue" -> s.copy(hue = n)
+                "colorControl.setColor" -> (a0 as? Map<*, *>)?.let { m ->
+                    s.copy(hue = (m["hue"] as? Number)?.toDouble(), saturation = (m["saturation"] as? Number)?.toDouble(), switchOn = true)
+                } ?: s
                 "lock.lock" -> s.copy(locked = true)
                 "lock.unlock" -> s.copy(locked = false)
                 "thermostatCoolingSetpoint.setCoolingSetpoint" -> s.copy(coolingSetpoint = n)

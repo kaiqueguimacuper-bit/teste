@@ -1,69 +1,113 @@
 package com.kaique.casahub.ui.theme
 
-import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
+import com.kaique.casahub.R
+import com.kaique.casahub.data.DeviceKind
 
-val Amber = Color(0xFFF2C14E)
-val AlertRed = Color(0xFFD64545)
+/** Paleta do CasaHub: grafite azulado com cores de estado por tipo de aparelho. */
+object Palette {
+    val Bg = Color(0xFF0A0D12)
+    val Surface = Color(0xFF131820)
+    val Surface2 = Color(0xFF1A2029)
+    val Surface3 = Color(0xFF232A35)
+    val Outline = Color(0xFF2B3340)
+    val Text = Color(0xFFF1F4F9)
+    val Muted = Color(0xFF8C97A8)
+    val Faint = Color(0xFF5B6576)
 
-private val Light = lightColorScheme(
-    primary = Color(0xFF1F6F5C),
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFCDEBDD),
-    onPrimaryContainer = Color(0xFF062B21),
-    secondary = Color(0xFF8A6A1F),
-    secondaryContainer = Color(0xFFFBE6B5),
-    onSecondaryContainer = Color(0xFF2B1F00),
-    background = Color(0xFFF4F6F2),
-    surface = Color(0xFFF4F6F2),
-    surfaceContainer = Color(0xFFE9EDE7),
-    surfaceContainerHigh = Color(0xFFE2E7E0),
-    surfaceContainerLow = Color(0xFFEFF2EC),
-)
+    val Accent = Color(0xFF7AA2FF)      // azul elétrico (ações principais)
+    val AccentDeep = Color(0xFF3F63D8)
+    val OnAccent = Color(0xFF07122E)
 
-private val Dark = darkColorScheme(
-    primary = Color(0xFF8ED6BD),
-    onPrimary = Color(0xFF00382B),
-    primaryContainer = Color(0xFF155443),
-    onPrimaryContainer = Color(0xFFCDEBDD),
-    secondary = Color(0xFFF2C14E),
-    secondaryContainer = Color(0xFF4A3A0C),
-    onSecondaryContainer = Color(0xFFFBE6B5),
-    background = Color(0xFF101412),
-    surface = Color(0xFF101412),
-    surfaceContainer = Color(0xFF1B211E),
-    surfaceContainerHigh = Color(0xFF252C28),
-    surfaceContainerLow = Color(0xFF161B18),
-)
-
-private val AppTypography = Typography().let { t ->
-    t.copy(
-        headlineMedium = t.headlineMedium.copy(fontWeight = FontWeight.SemiBold, letterSpacing = (-0.5).sp),
-        titleLarge = t.titleLarge.copy(fontWeight = FontWeight.SemiBold),
-        titleMedium = t.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-    )
+    val Amber = Color(0xFFFFC85C)       // luz
+    val Cyan = Color(0xFF5DD9F0)        // clima
+    val Violet = Color(0xFFB79CFF)      // tomadas / eletro
+    val Green = Color(0xFF4FDDA4)       // seguro / ok
+    val Coral = Color(0xFFFF7B72)       // alerta / desligar
+    val Pink = Color(0xFFFF8FC7)        // som
 }
 
+fun kindColor(kind: DeviceKind): Color = when (kind) {
+    DeviceKind.LIGHT -> Palette.Amber
+    DeviceKind.TV, DeviceKind.CAMERA -> Palette.Accent
+    DeviceKind.SPEAKER -> Palette.Pink
+    DeviceKind.AC, DeviceKind.THERMOSTAT, DeviceKind.SENSOR -> Palette.Cyan
+    DeviceKind.LOCK -> Palette.Green
+    DeviceKind.CONTACT, DeviceKind.MOTION, DeviceKind.LEAK -> Palette.Coral
+    DeviceKind.SHADE -> Palette.Amber
+    DeviceKind.PLUG, DeviceKind.APPLIANCE, DeviceKind.OTHER -> Palette.Violet
+}
+
+val Display = FontFamily(
+    Font(R.font.sora_300, FontWeight.Light),
+    Font(R.font.sora_600, FontWeight.SemiBold),
+    Font(R.font.sora_700, FontWeight.Bold),
+)
+
+val Body = FontFamily(
+    Font(R.font.manrope_400, FontWeight.Normal),
+    Font(R.font.manrope_500, FontWeight.Medium),
+    Font(R.font.manrope_600, FontWeight.SemiBold),
+    Font(R.font.manrope_700, FontWeight.Bold),
+    Font(R.font.manrope_800, FontWeight.ExtraBold),
+)
+
+private val AppTypography = Typography(
+    displayLarge = TextStyle(fontFamily = Display, fontWeight = FontWeight.Light, fontSize = 64.sp, lineHeight = 66.sp, letterSpacing = (-2).sp),
+    displayMedium = TextStyle(fontFamily = Display, fontWeight = FontWeight.Light, fontSize = 48.sp, lineHeight = 52.sp, letterSpacing = (-1.5).sp),
+    headlineLarge = TextStyle(fontFamily = Display, fontWeight = FontWeight.SemiBold, fontSize = 30.sp, lineHeight = 36.sp, letterSpacing = (-0.8).sp),
+    headlineMedium = TextStyle(fontFamily = Display, fontWeight = FontWeight.SemiBold, fontSize = 24.sp, lineHeight = 30.sp, letterSpacing = (-0.5).sp),
+    headlineSmall = TextStyle(fontFamily = Display, fontWeight = FontWeight.SemiBold, fontSize = 20.sp, lineHeight = 26.sp, letterSpacing = (-0.3).sp),
+    titleLarge = TextStyle(fontFamily = Body, fontWeight = FontWeight.Bold, fontSize = 18.sp, lineHeight = 24.sp),
+    titleMedium = TextStyle(fontFamily = Body, fontWeight = FontWeight.Bold, fontSize = 16.sp, lineHeight = 22.sp),
+    titleSmall = TextStyle(fontFamily = Body, fontWeight = FontWeight.Bold, fontSize = 14.sp, lineHeight = 19.sp),
+    bodyLarge = TextStyle(fontFamily = Body, fontWeight = FontWeight.Medium, fontSize = 16.sp, lineHeight = 23.sp),
+    bodyMedium = TextStyle(fontFamily = Body, fontWeight = FontWeight.Medium, fontSize = 14.sp, lineHeight = 20.sp),
+    bodySmall = TextStyle(fontFamily = Body, fontWeight = FontWeight.Medium, fontSize = 12.sp, lineHeight = 16.sp),
+    labelLarge = TextStyle(fontFamily = Body, fontWeight = FontWeight.Bold, fontSize = 14.sp, lineHeight = 18.sp, letterSpacing = 0.2.sp),
+    labelMedium = TextStyle(fontFamily = Body, fontWeight = FontWeight.SemiBold, fontSize = 12.sp, lineHeight = 16.sp, letterSpacing = 0.3.sp),
+    labelSmall = TextStyle(fontFamily = Body, fontWeight = FontWeight.Bold, fontSize = 11.sp, lineHeight = 14.sp, letterSpacing = 1.2.sp),
+)
+
+private val Scheme = darkColorScheme(
+    primary = Palette.Accent,
+    onPrimary = Palette.OnAccent,
+    primaryContainer = Palette.AccentDeep,
+    onPrimaryContainer = Palette.Text,
+    secondary = Palette.Amber,
+    onSecondary = Color(0xFF2A1C00),
+    secondaryContainer = Palette.Surface3,
+    onSecondaryContainer = Palette.Text,
+    tertiary = Palette.Cyan,
+    background = Palette.Bg,
+    onBackground = Palette.Text,
+    surface = Palette.Bg,
+    onSurface = Palette.Text,
+    surfaceVariant = Palette.Surface2,
+    onSurfaceVariant = Palette.Muted,
+    surfaceContainerLowest = Palette.Bg,
+    surfaceContainerLow = Palette.Surface,
+    surfaceContainer = Palette.Surface,
+    surfaceContainerHigh = Palette.Surface2,
+    surfaceContainerHighest = Palette.Surface3,
+    outline = Palette.Outline,
+    outlineVariant = Palette.Outline,
+    error = Palette.Coral,
+    onError = Color(0xFF2D0503),
+    inverseSurface = Palette.Text,
+    inverseOnSurface = Palette.Bg,
+)
+
 @Composable
-fun CasaHubTheme(dynamic: Boolean = true, content: @Composable () -> Unit) {
-    val dark = isSystemInDarkTheme()
-    val ctx = LocalContext.current
-    val scheme = when {
-        dynamic && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
-            if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
-        dark -> Dark
-        else -> Light
-    }
-    MaterialTheme(colorScheme = scheme, typography = AppTypography, content = content)
+fun CasaHubTheme(content: @Composable () -> Unit) {
+    MaterialTheme(colorScheme = Scheme, typography = AppTypography, content = content)
 }

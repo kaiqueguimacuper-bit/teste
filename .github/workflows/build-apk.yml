@@ -45,13 +45,41 @@ jobs:
           name: CasaHub-apk
           path: saida/*.apk
 
+      # Testa o APK num emulador e tira capturas de cada tela.
+      - name: Habilitar KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Capturas no emulador
+        continue-on-error: true
+        timeout-minutes: 25
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          script: bash .github/scripts/screens.sh
+
+      - name: Resultado das capturas
+        if: always()
+        run: |
+          cat shots/status.txt 2>/dev/null | while IFS= read -r l; do echo "::notice::$l"; done
+          grep -q CRASH shots/status.txt 2>/dev/null && head -30 shots/crash.txt | while IFS= read -r l; do echo "::error::$l"; done || true
+
       # Publica o APK numa página de Release, com link fixo para baixar no celular.
       - name: Publicar release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="build-${{ github.run_number }}"
-          gh release create "$TAG" saida/CasaHub.apk saida/CasaHub-debug.apk \
+          FILES="saida/CasaHub.apk saida/CasaHub-debug.apk"
+          ls shots/* >/dev/null 2>&1 && FILES="$FILES $(ls shots/*)"
+          gh release create "$TAG" $FILES \
             --title "CasaHub ${{ github.run_number }}" \
             --notes "APK gerado automaticamente. Baixe CasaHub.apk no celular e instale." \
             --latest

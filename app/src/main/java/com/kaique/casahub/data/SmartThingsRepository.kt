@@ -146,6 +146,17 @@ class SmartThingsRepository(
         private fun JSONObject.unit(cap: String, attr: String): String? =
             optJSONObject(cap)?.optJSONObject(attr)?.optString("unit")?.takeIf { it.isNotBlank() }
 
+        private fun Any?.strings(): List<String> {
+            val arr = this as? JSONArray ?: return emptyList()
+            return (0 until arr.length()).mapNotNull { i ->
+                when (val v = arr.opt(i)) {
+                    is String -> v
+                    is JSONObject -> v.optString("id").ifBlank { null }
+                    else -> null
+                }
+            }
+        }
+
         private fun Any?.num(): Double? = when (this) {
             is Number -> toDouble()
             is String -> toDoubleOrNull()
@@ -165,6 +176,17 @@ class SmartThingsRepository(
             heatingSetpoint = m.attr(Caps.THERMOSTAT_HEAT, "heatingSetpoint").num(),
             coolingSetpoint = m.attr(Caps.THERMOSTAT_COOL, "coolingSetpoint").num(),
             thermostatMode = m.attr(Caps.THERMOSTAT_MODE, "thermostatMode") as? String,
+            acMode = m.attr(Caps.AC_MODE, "airConditionerMode") as? String,
+            acModes = m.attr(Caps.AC_MODE, "supportedAcModes").strings(),
+            fanMode = m.attr(Caps.AC_FAN, "fanMode") as? String,
+            fanModes = m.attr(Caps.AC_FAN, "supportedAcFanModes").strings(),
+            energy = m.attr(Caps.ENERGY, "energy").num(),
+            channel = m.attr(Caps.CHANNEL, "tvChannel")?.toString()?.takeIf { it.isNotBlank() },
+            channelName = (m.attr(Caps.CHANNEL, "tvChannelName") as? String)?.takeIf { it.isNotBlank() },
+            inputSource = (m.attr(Caps.INPUT_SAMSUNG, "inputSource") ?: m.attr(Caps.INPUT, "inputSource")) as? String,
+            inputSources = m.attr(Caps.INPUT_SAMSUNG, "supportedInputSourcesMap").strings()
+                .ifEmpty { m.attr(Caps.INPUT, "supportedInputSources").strings() },
+            playback = m.attr(Caps.PLAYBACK, "playbackStatus") as? String,
             locked = (m.attr(Caps.LOCK, "lock") as? String)?.let { it == "locked" },
             contactOpen = (m.attr(Caps.CONTACT, "contact") as? String)?.let { it == "open" },
             motion = (m.attr(Caps.MOTION, "motion") as? String)?.let { it == "active" },

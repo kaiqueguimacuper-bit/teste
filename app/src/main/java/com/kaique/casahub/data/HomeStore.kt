@@ -249,6 +249,33 @@ class HomeStore(
         }
     }
 
+    /**
+     * Comando rápido (teclas do controle remoto, volume, canal): envia na hora, sem esperar
+     * nem reler o status. Se [optimistic] vier, a tela já mostra o novo estado.
+     */
+    fun fire(device: Device, cmd: Command?, optimistic: ((DeviceState) -> DeviceState)? = null) {
+        val r = repo ?: return
+        if (cmd == null) {
+            _state.update { it.copy(message = "Este aparelho não aceita esse comando.") }
+            return
+        }
+        if (device.state.online == false) {
+            _state.update { it.copy(message = "${device.name} está offline.") }
+            return
+        }
+        val before = _state.value.devices.firstOrNull { it.id == device.id }?.state ?: device.state
+        if (optimistic != null) setDeviceState(device.id, optimistic(before))
+        scope.launch {
+            try {
+                r.command(device.id, cmd)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (optimistic != null) setDeviceState(device.id, before)
+                _state.update { it.copy(message = e.message ?: "Não foi possível enviar o comando.") }
+            }
+        }
+    }
+
     /** Desliga tudo o que estiver ligado entre os dispositivos visíveis. */
     fun allOff() {
         val targets = _state.value.visibleDevices.filter { it.canToggle && it.state.switchOn == true && it.state.online != false }
