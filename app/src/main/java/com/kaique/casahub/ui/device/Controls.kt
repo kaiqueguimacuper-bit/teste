@@ -162,7 +162,7 @@ fun LightControl(device: Device, store: HomeStore) {
                 onChange = { preview = it },
                 onCommit = { v ->
                     tick()
-                    store.send(device, Command(Caps.LEVEL, "setLevel", listOf(v))) { it.copy(level = v, switchOn = v > 0) }
+                    store.send(device, device.cmd(Caps.LEVEL, "setLevel", listOf(v))) { it.copy(level = v, switchOn = v > 0) }
                 },
             )
         } else {
@@ -181,7 +181,7 @@ fun LightControl(device: Device, store: HomeStore) {
                                 .border(1.dp, if (sel) c else Palette.Outline, RoundedCornerShape(20.dp))
                                 .clickable(enabled = !offline) {
                                     tick()
-                                    store.send(device, Command(Caps.COLOR_TEMP, "setColorTemperature", listOf(k))) { it.copy(colorTemp = k, switchOn = true) }
+                                    store.send(device, device.cmd(Caps.COLOR_TEMP, "setColorTemperature", listOf(k))) { it.copy(colorTemp = k, switchOn = true) }
                                 }
                                 .padding(vertical = 14.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
@@ -208,7 +208,7 @@ fun LightControl(device: Device, store: HomeStore) {
                                 .padding(5.dp).clip(CircleShape).background(c)
                                 .clickable(enabled = !offline) {
                                     tick()
-                                    store.send(device, Command(Caps.COLOR, "setColor", listOf(mapOf("hue" to h, "saturation" to 100)))) {
+                                    store.send(device, device.cmd(Caps.COLOR, "setColor", listOf(mapOf("hue" to h, "saturation" to 100)))) {
                                         it.copy(hue = h.toDouble(), saturation = 100.0, switchOn = true)
                                     }
                                 },
@@ -253,8 +253,8 @@ fun ClimateControl(device: Device, store: HomeStore) {
     fun setTo(v: Double) {
         val t = v.coerceIn(minT, maxT)
         tick()
-        if (cooling) store.send(device, Command(Caps.THERMOSTAT_COOL, "setCoolingSetpoint", listOf(t))) { it.copy(coolingSetpoint = t) }
-        else store.send(device, Command(Caps.THERMOSTAT_HEAT, "setHeatingSetpoint", listOf(t))) { it.copy(heatingSetpoint = t) }
+        if (cooling) store.send(device, device.cmd(Caps.THERMOSTAT_COOL, "setCoolingSetpoint", listOf(t))) { it.copy(coolingSetpoint = t) }
+        else store.send(device, device.cmd(Caps.THERMOSTAT_HEAT, "setHeatingSetpoint", listOf(t))) { it.copy(heatingSetpoint = t) }
     }
 
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(24.dp)) {
@@ -289,14 +289,14 @@ fun ClimateControl(device: Device, store: HomeStore) {
         if (modes.isNotEmpty()) {
             ChipGroup("Modo", modes.map { it to Labels.acMode(it) }, s.acMode, Palette.Cyan, enabled = !offline) { m ->
                 tick()
-                store.send(device, Command(Caps.AC_MODE, "setAirConditionerMode", listOf(m))) { it.copy(acMode = m, switchOn = true) }
+                store.send(device, device.cmd(Caps.AC_MODE, "setAirConditionerMode", listOf(m))) { it.copy(acMode = m, switchOn = true) }
             }
         }
         val fans = s.fanModes.ifEmpty { if (device.has(Caps.AC_FAN)) listOf("auto", "low", "medium", "high") else emptyList() }
         if (fans.isNotEmpty()) {
             ChipGroup("Ventilador", fans.map { it to Labels.fanMode(it) }, s.fanMode, Palette.Accent, enabled = !offline && on) { f ->
                 tick()
-                store.send(device, Command(Caps.AC_FAN, "setFanMode", listOf(f))) { it.copy(fanMode = f) }
+                store.send(device, device.cmd(Caps.AC_FAN, "setFanMode", listOf(f))) { it.copy(fanMode = f) }
             }
         }
     }
@@ -333,7 +333,7 @@ fun LockControl(device: Device, store: HomeStore) {
     val act by rememberUpdatedState {
         tick()
         val target = !locked
-        store.send(device, Command(Caps.LOCK, if (target) "lock" else "unlock")) { it.copy(locked = target) }
+        store.send(device, device.cmd(Caps.LOCK, if (target) "lock" else "unlock")) { it.copy(locked = target) }
     }
 
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(18.dp)) {
@@ -398,7 +398,7 @@ fun ShadeControl(device: Device, store: HomeStore) {
                 onChange = { preview = it },
                 onCommit = { v ->
                     tick()
-                    store.send(device, Command(Caps.SHADE_LEVEL, "setShadeLevel", listOf(v))) { it.copy(shadeLevel = v) }
+                    store.send(device, device.cmd(Caps.SHADE_LEVEL, "setShadeLevel", listOf(v))) { it.copy(shadeLevel = v) }
                 },
             )
         }
@@ -406,15 +406,15 @@ fun ShadeControl(device: Device, store: HomeStore) {
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 LabeledRound("Abrir") {
                     RoundButton(Icons.Rounded.KeyboardArrowUp, "Abrir", {
-                        tick(); store.send(device, Command(Caps.SHADE, "open")) { it.copy(shadeLevel = 100, shadeState = "open") }
+                        tick(); store.send(device, device.cmd(Caps.SHADE, "open")) { it.copy(shadeLevel = 100, shadeState = "open") }
                     }, size = 64.dp, enabled = !offline)
                 }
                 LabeledRound("Pausar") {
-                    RoundButton(Icons.Rounded.Pause, "Pausar", { tick(); store.fire(device, Command(Caps.SHADE, "pause")) }, size = 64.dp, enabled = !offline)
+                    RoundButton(Icons.Rounded.Pause, "Pausar", { tick(); store.fire(device, device.cmd(Caps.SHADE, "pause")) }, size = 64.dp, enabled = !offline)
                 }
                 LabeledRound("Fechar") {
                     RoundButton(Icons.Rounded.KeyboardArrowDown, "Fechar", {
-                        tick(); store.send(device, Command(Caps.SHADE, "close")) { it.copy(shadeLevel = 0, shadeState = "closed") }
+                        tick(); store.send(device, device.cmd(Caps.SHADE, "close")) { it.copy(shadeLevel = 0, shadeState = "closed") }
                     }, size = 64.dp, enabled = !offline)
                 }
             }
@@ -446,7 +446,7 @@ fun SpeakerControl(device: Device, store: HomeStore) {
                 value = vol, onValueChange = { vol = it }, valueRange = 0f..100f, enabled = !offline,
                 onValueChangeFinished = {
                     val v = vol.roundToInt(); tick()
-                    store.send(device, Command(Caps.VOLUME, "setVolume", listOf(v))) { it.copy(volume = v) }
+                    store.send(device, device.cmd(Caps.VOLUME, "setVolume", listOf(v))) { it.copy(volume = v) }
                 },
                 colors = SliderDefaults.colors(thumbColor = Palette.Pink, activeTrackColor = Palette.Pink, inactiveTrackColor = Palette.Surface3),
             )
@@ -455,7 +455,7 @@ fun SpeakerControl(device: Device, store: HomeStore) {
             val playing = s.playback == "playing"
             RoundButton(
                 if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, if (playing) "Pausar" else "Tocar",
-                { tick(); store.fire(device, Command(Caps.PLAYBACK, if (playing) "pause" else "play")) { it.copy(playback = if (playing) "paused" else "playing") } },
+                { tick(); store.fire(device, device.cmd(Caps.PLAYBACK, if (playing) "pause" else "play")) { it.copy(playback = if (playing) "paused" else "playing") } },
                 size = 72.dp, container = Palette.Text, tint = Palette.Bg, iconSize = 34.dp, enabled = !offline,
             )
         }

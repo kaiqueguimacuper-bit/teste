@@ -27,6 +27,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,6 +53,9 @@ fun DeviceScreen(device: Device, state: UiState, store: HomeStore, onBack: () ->
     val active = device.isActive && !offline
     val favorite = device.id in state.favorites
     val pending = device.id in state.pending
+
+    // Ao abrir: pede o estado atualizado ao aparelho (volume/canal reais) e prepara as teclas da TV.
+    LaunchedEffect(device.id) { store.deviceOpened(device) }
 
     Box(Modifier.fillMaxSize().background(Palette.Bg)) {
         Box(

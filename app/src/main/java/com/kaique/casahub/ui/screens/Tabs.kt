@@ -73,6 +73,17 @@ import com.kaique.casahub.ui.components.rememberTick
 import com.kaique.casahub.ui.theme.Body
 import com.kaique.casahub.ui.theme.Palette
 import java.util.Calendar
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
+import com.kaique.casahub.data.Caps
+import com.kaique.casahub.data.DeviceKind
 
 private val gridPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 120.dp)
 
@@ -470,8 +481,76 @@ fun SettingsTab(state: UiState, store: HomeStore) {
                 Text(if (state.demo) "Sair do modo demo" else "Desconectar conta", style = MaterialTheme.typography.titleMedium, color = Palette.Coral)
             }
         }
+        full("diag") { DiagnosticsPanel(state, store) }
         full("sobre") {
-            Text("CasaHub 2.0 · controle seus aparelhos SmartThings", style = MaterialTheme.typography.bodySmall, color = Palette.Faint, modifier = Modifier.padding(top = 8.dp))
+            Text("CasaHub 2.1 · controle seus aparelhos SmartThings", style = MaterialTheme.typography.bodySmall, color = Palette.Faint, modifier = Modifier.padding(top = 8.dp))
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticsPanel(state: UiState, store: HomeStore) {
+    val clipboard = LocalClipboardManager.current
+    var entries by remember { mutableStateOf(store.diagnostics()) }
+    var open by remember { mutableStateOf(false) }
+    val fmtTime = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+    val tvs = state.devices.filter { it.kind == DeviceKind.TV }
+
+    fun report(): String = buildString {
+        appendLine("CasaHub 2.1 — diagnóstico")
+        appendLine("Modo: " + if (state.demo) "demo" else "SmartThings")
+        tvs.forEach { tv ->
+            appendLine("TV ${tv.name}: online=${tv.state.online} switch=${tv.state.switchOn} volume=${tv.state.volume}")
+            appendLine("  remoteControl=${tv.has(Caps.REMOTE)} (${tv.componentFor(Caps.REMOTE)} v${tv.capVersions[Caps.REMOTE] ?: "-"}) keypad=${tv.has(Caps.KEYPAD)} refresh=${tv.has(Caps.REFRESH)}")
+            state.remoteKeys[tv.id]?.let { appendLine("  teclas aceitas: ${it.joinToString()}") }
+        }
+        entries.forEach { e ->
+            appendLine("${fmtTime.format(Date(e.time))} ${e.method} ${e.path} -> ${e.code} (${e.ms} ms)" + (e.detail?.let { " $it" } ?: ""))
+        }
+    }
+
+    Panel(Modifier.fillMaxWidth(), radius = 24.dp) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Diagnóstico da conexão", style = MaterialTheme.typography.titleMedium)
+                Text("Mostra as últimas respostas da SmartThings, para achar o motivo de um comando não funcionar.",
+                    style = MaterialTheme.typography.bodySmall, color = Palette.Muted)
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OptionChip(if (open) "Ocultar" else "Ver registros", selected = open, onClick = { entries = store.diagnostics(); open = !open })
+            OptionChip("Copiar relatório", selected = false, onClick = {
+                entries = store.diagnostics()
+                clipboard.setText(AnnotatedString(report()))
+                store.notify("Relatório copiado. Cole na conversa para análise.")
+            })
+        }
+        if (open) {
+            Spacer(Modifier.height(12.dp))
+            tvs.forEach { tv ->
+                val via = when {
+                    tv.has(Caps.REMOTE) -> "samsungvd.remoteControl"
+                    tv.has(Caps.KEYPAD) -> "keypadInput"
+                    else -> "nenhum (a TV não aceita teclas pela nuvem)"
+                }
+                Text("${tv.name}: teclas via $via", style = MaterialTheme.typography.bodySmall)
+            }
+            if (entries.isEmpty()) Text("Nenhuma chamada registrada ainda.", style = MaterialTheme.typography.bodySmall, color = Palette.Muted)
+            entries.take(25).forEach { e ->
+                val ok = e.code in 200..299
+                Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.Top) {
+                    Dot(if (ok) Palette.Green else Palette.Coral, 7.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text("${e.method} ${e.path.take(60)}", style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            "${fmtTime.format(Date(e.time))} · ${if (e.code < 0) "sem conexão" else e.code.toString()} · ${e.ms} ms" + (e.detail?.let { " · $it" } ?: ""),
+                            style = MaterialTheme.typography.bodySmall, color = if (ok) Palette.Muted else Palette.Coral, maxLines = 3,
+                        )
+                    }
+                }
+            }
         }
     }
 }

@@ -11,7 +11,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.withPermit
 
 /** O que o app precisa guardar entre sessões (implementado por [Prefs] no Android). */
@@ -48,6 +50,8 @@ data class UiState(
     val pending: Set<String> = emptySet(),
     val runningScene: String? = null,
     val autoRefresh: Boolean = true,
+    /** Teclas aceitas por cada TV (lidas da SmartThings), para o diagnóstico. */
+    val remoteKeys: Map<String, List<String>> = emptyMap(),
     val lastUpdated: Long = 0L,
 ) {
     val locationName: String get() = locations.firstOrNull { it.id == locationId }?.name ?: "Minha casa"
@@ -189,8 +193,14 @@ class HomeStore(
             }
             val withStatus = fetchStatuses(r, devices)
             _state.update { s ->
+                val now = System.currentTimeMillis()
                 val merged = withStatus.map { d ->
-                    if (d.id in s.pending) s.devices.firstOrNull { it.id == d.id } ?: d else d
+                    val cur = s.devices.firstOrNull { it.id == d.id }
+                    val recentlySynced = now - (synchronized(syncedAt) { syncedAt[d.id] } ?: 0L) < 30_000
+                    when {
+                        cur != null && (d.id in s.pending || recentlySynced) -> d.copy(state = cur.state)
+                        else -> d
+                    }
                 }
                 s.copy(
                     loading = false, refreshing = false, error = null,
@@ -198,6 +208,8 @@ class HomeStore(
                     lastUpdated = System.currentTimeMillis(),
                 )
             }
+            // O aparelho aberto na tela é relido com "refresh", para mostrar volume/canal reais.
+            focusedId?.let { id -> _state.value.devices.firstOrNull { it.id == id }?.let { scheduleSync(it, delayMs = 0) } }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             val unauthorized = (e as? ApiException)?.code == 401
@@ -226,14 +238,15 @@ class HomeStore(
 
     // ---------- Comandos ----------
 
-    fun toggle(device: Device) {
-        val on = device.state.switchOn ?: return
-        send(device, Command(Caps.SWITCH, if (on) "off" else "on")) { it.copy(switchOn = !on) }
+    /** Liga/desliga. Com [force], tenta mesmo se a SmartThings diz que o aparelho está offline (TV em espera). */
+    fun toggle(device: Device, force: Boolean = false) {
+        val on = device.state.switchOn ?: (if (force) device.state.online == true else return)
+        send(device, device.cmd(Caps.SWITCH, if (on) "off" else "on"), force) { it.copy(switchOn = !on) }
     }
 
-    fun send(device: Device, cmd: Command, optimistic: (DeviceState) -> DeviceState) {
+    fun send(device: Device, cmd: Command, force: Boolean = false, optimistic: (DeviceState) -> DeviceState) {
         val r = repo ?: return
-        if (device.state.online == false) {
+        if (device.state.online == false && !force) {
             _state.update { it.copy(message = "${device.name} está offline.") }
             return
         }
@@ -256,32 +269,140 @@ class HomeStore(
         }
     }
 
+    // ---------- Controle remoto e comandos rápidos ----------
+
+    private val queues = mutableMapOf<String, Mutex>()
+    private val waiting = mutableMapOf<String, Int>()
+    private val syncJobs = mutableMapOf<String, Job>()
+    private val keyNames = mutableMapOf<String, Map<RemoteKey, String>>()
+    private val useKeypad = mutableSetOf<String>()
+    private val syncedAt = mutableMapOf<String, Long>()
+    private var focusedId: String? = null
+
+    fun deviceClosed() { focusedId = null }
+
+    private fun queue(id: String) = synchronized(queues) { queues.getOrPut(id) { Mutex() } }
+
     /**
-     * Comando rápido (teclas do controle remoto, volume, canal): envia na hora, sem esperar
-     * nem reler o status. Se [optimistic] vier, a tela já mostra o novo estado.
+     * Comando rápido (teclas, volume, canal): entra numa fila por aparelho, para chegar na
+     * ordem certa e sem atropelar a SmartThings. Com [coalesce], toques repetidos enquanto
+     * a fila está cheia são descartados (segurar o volume não acumula atraso).
+     * Depois de comandos de volume/canal/fonte o app relê o estado real do aparelho.
      */
-    fun fire(device: Device, cmd: Command?, optimistic: ((DeviceState) -> DeviceState)? = null) {
+    fun fire(
+        device: Device,
+        cmd: Command?,
+        coalesce: Boolean = false,
+        optimistic: ((DeviceState) -> DeviceState)? = null,
+    ) {
         val r = repo ?: return
         if (cmd == null) {
             _state.update { it.copy(message = "Este aparelho não aceita esse comando.") }
             return
         }
         if (device.state.online == false) {
-            _state.update { it.copy(message = "${device.name} está offline.") }
+            _state.update { it.copy(message = "${device.name} está sem conexão. Ligue o aparelho e tente de novo.") }
             return
         }
+        if (coalesce && synchronized(waiting) { (waiting[device.id] ?: 0) >= 2 }) return
+        synchronized(waiting) { waiting[device.id] = (waiting[device.id] ?: 0) + 1 }
         val before = _state.value.devices.firstOrNull { it.id == device.id }?.state ?: device.state
         if (optimistic != null) setDeviceState(device.id, optimistic(before))
         scope.launch {
             try {
-                r.command(device.id, cmd)
+                queue(device.id).withLock { r.command(device.id, cmd) }
+                if (TvCommands.isRelative(cmd)) scheduleSync(device)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 if (optimistic != null) setDeviceState(device.id, before)
                 _state.update { it.copy(message = e.message ?: "Não foi possível enviar o comando.") }
+                scheduleSync(device)
+            } finally {
+                synchronized(waiting) { waiting[device.id] = ((waiting[device.id] ?: 1) - 1).coerceAtLeast(0) }
             }
         }
     }
+
+    /** Envia uma tecla do controle no formato que a TV aceita, com plano B pelo keypadInput. */
+    fun pressKey(device: Device, key: RemoteKey, coalesce: Boolean = false) {
+        val r = repo ?: return
+        if (!device.has(Caps.REMOTE) && !device.has(Caps.KEYPAD)) {
+            _state.update { it.copy(message = "Esta TV não recebe teclas de navegação pela SmartThings.") }
+            return
+        }
+        if (device.state.online == false) {
+            _state.update { it.copy(message = "${device.name} está sem conexão. Ligue a TV e tente de novo.") }
+            return
+        }
+        if (coalesce && synchronized(waiting) { (waiting[device.id] ?: 0) >= 2 }) return
+        synchronized(waiting) { waiting[device.id] = (waiting[device.id] ?: 0) + 1 }
+        scope.launch {
+            try {
+                queue(device.id).withLock {
+                    val keypad = device.id in useKeypad
+                    val cmd = TvCommands.key(device, key, keyNames[device.id]?.get(key), preferKeypad = keypad)
+                        ?: throw ApiException(0, "Esta TV não recebe teclas de navegação pela SmartThings.")
+                    try {
+                        r.command(device.id, cmd)
+                    } catch (e: ApiException) {
+                        // Plano B: se a TV recusar o samsungvd.remoteControl, tenta o keypadInput.
+                        val canFallback = !keypad && cmd.capability == Caps.REMOTE && device.has(Caps.KEYPAD) &&
+                            e.code in setOf(400, 403, 404, 422)
+                        if (!canFallback) throw e
+                        r.command(device.id, TvCommands.key(device, key, preferKeypad = true)!!)
+                        useKeypad += device.id
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                _state.update { it.copy(message = e.message ?: "A TV não recebeu a tecla.") }
+            } finally {
+                synchronized(waiting) { waiting[device.id] = ((waiting[device.id] ?: 1) - 1).coerceAtLeast(0) }
+            }
+        }
+    }
+
+    /**
+     * Ao abrir um aparelho: pede para ele atualizar o estado na nuvem e relê tudo,
+     * e, para TVs, descobre os nomes de tecla que o modelo aceita.
+     */
+    fun deviceOpened(device: Device) {
+        val r = repo ?: return
+        focusedId = device.id
+        scheduleSync(device, delayMs = 0)
+        if (device.has(Caps.REMOTE) && device.id !in keyNames) {
+            scope.launch {
+                val accepted = runCatching {
+                    r.commandArgValues(Caps.REMOTE, device.capVersions[Caps.REMOTE] ?: 1, "send")
+                }.getOrDefault(emptyList())
+                keyNames[device.id] = TvCommands.resolveKeys(accepted)
+                _state.update { it.copy(remoteKeys = it.remoteKeys + (device.id to accepted)) }
+            }
+        }
+    }
+
+    /** Relê o estado real do aparelho pouco depois do último comando (com "refresh" antes, se houver). */
+    private fun scheduleSync(device: Device, delayMs: Long = settleDelayMs + 300) {
+        val r = repo ?: return
+        synchronized(syncJobs) {
+            syncJobs[device.id]?.cancel()
+            syncJobs[device.id] = scope.launch {
+                delay(delayMs)
+                if (device.has(Caps.REFRESH)) {
+                    runCatching { queue(device.id).withLock { r.refreshDevice(device.id, device.componentFor(Caps.REFRESH)) } }
+                    delay(700)
+                }
+                val fresh = runCatching { r.status(device.id) }.getOrNull() ?: return@launch
+                if (device.id !in _state.value.pending) {
+                    val cur = _state.value.devices.firstOrNull { it.id == device.id }?.state
+                    setDeviceState(device.id, fresh.copy(online = fresh.online ?: cur?.online))
+                    synchronized(syncedAt) { syncedAt[device.id] = System.currentTimeMillis() }
+                }
+            }
+        }
+    }
+
+    fun diagnostics(): List<ApiLogEntry> = repo?.diagnostics().orEmpty()
 
     /** Desliga tudo o que estiver ligado entre os dispositivos visíveis. */
     fun allOff() {
@@ -290,7 +411,7 @@ class HomeStore(
             _state.update { it.copy(message = "Nada ligado aqui.") }
             return
         }
-        targets.forEach { d -> send(d, Command(Caps.SWITCH, "off")) { it.copy(switchOn = false) } }
+        targets.forEach { d -> send(d, d.cmd(Caps.SWITCH, "off")) { it.copy(switchOn = false) } }
         _state.update { it.copy(message = "Desligando ${targets.size} dispositivo(s)…") }
     }
 
@@ -327,6 +448,7 @@ class HomeStore(
     fun setRoomFilter(f: String) = _state.update { it.copy(roomFilter = f) }
     fun setQuery(q: String) = _state.update { it.copy(query = q) }
     fun consumeMessage() = _state.update { it.copy(message = null) }
+    fun notify(text: String) = _state.update { it.copy(message = text) }
     fun clearError() = _state.update { it.copy(error = null) }
     fun setAutoRefresh(on: Boolean) {
         settings.autoRefresh = on

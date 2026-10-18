@@ -51,8 +51,17 @@ data class Device(
     val capabilities: Set<String>,
     val category: String?,
     val state: DeviceState = DeviceState(),
+    /** Em qual componente cada capacidade está (a maioria fica em "main"). */
+    val capComponents: Map<String, String> = emptyMap(),
+    /** Versão de cada capacidade, para ler a definição dela na SmartThings. */
+    val capVersions: Map<String, Int> = emptyMap(),
 ) {
     fun has(cap: String) = cap in capabilities
+
+    fun componentFor(cap: String): String = capComponents[cap] ?: "main"
+
+    /** Monta um comando já no componente certo do aparelho. */
+    fun cmd(cap: String, command: String, args: List<Any> = emptyList()) = Command(cap, command, args, componentFor(cap))
 
     val canToggle: Boolean get() = has(Caps.SWITCH)
 
@@ -142,6 +151,7 @@ object Caps {
     const val SHADE = "windowShade"
     const val SHADE_LEVEL = "windowShadeLevel"
     const val HEALTH = "healthCheck"
+    const val REFRESH = "refresh"
     const val REMOTE = "samsungvd.remoteControl"
     const val KEYPAD = "keypadInput"
     const val CHANNEL = "tvChannel"
@@ -168,35 +178,63 @@ object TvCommands {
         TvApp("Max", "3201601007230"),
     )
 
-    fun key(d: Device, k: RemoteKey): Command? = when {
-        d.has(Caps.REMOTE) -> Command(Caps.REMOTE, "send", listOf(k.samsung))
-        d.has(Caps.KEYPAD) -> Command(Caps.KEYPAD, "sendKey", listOf(k.keypad))
+    /**
+     * Tecla de navegação. [keyName] permite usar o nome que a própria TV declara
+     * (lido da definição da capacidade); [preferKeypad] força o keypadInput.
+     */
+    fun key(d: Device, k: RemoteKey, keyName: String? = null, preferKeypad: Boolean = false): Command? = when {
+        d.has(Caps.REMOTE) && !(preferKeypad && d.has(Caps.KEYPAD)) -> d.cmd(Caps.REMOTE, "send", listOf(keyName ?: k.samsung))
+        d.has(Caps.KEYPAD) -> d.cmd(Caps.KEYPAD, "sendKey", listOf(k.keypad))
         else -> null
     }
 
     fun number(d: Device, n: Int): Command? =
-        if (d.has(Caps.KEYPAD)) Command(Caps.KEYPAD, "sendKey", listOf("NUMBER$n")) else null
+        if (d.has(Caps.KEYPAD)) d.cmd(Caps.KEYPAD, "sendKey", listOf("NUMBER$n")) else null
 
     fun channel(d: Device, number: String): Command? =
-        if (d.has(Caps.CHANNEL)) Command(Caps.CHANNEL, "setTvChannel", listOf(number)) else null
+        if (d.has(Caps.CHANNEL)) d.cmd(Caps.CHANNEL, "setTvChannel", listOf(number)) else null
 
-    fun channelUp(d: Device): Command? = if (d.has(Caps.CHANNEL)) Command(Caps.CHANNEL, "channelUp") else null
-    fun channelDown(d: Device): Command? = if (d.has(Caps.CHANNEL)) Command(Caps.CHANNEL, "channelDown") else null
-    fun volumeUp(d: Device): Command? = if (d.has(Caps.VOLUME)) Command(Caps.VOLUME, "volumeUp") else null
-    fun volumeDown(d: Device): Command? = if (d.has(Caps.VOLUME)) Command(Caps.VOLUME, "volumeDown") else null
-    fun mute(d: Device, on: Boolean): Command? = if (d.has(Caps.MUTE)) Command(Caps.MUTE, if (on) "mute" else "unmute") else null
+    fun channelUp(d: Device): Command? = if (d.has(Caps.CHANNEL)) d.cmd(Caps.CHANNEL, "channelUp") else null
+    fun channelDown(d: Device): Command? = if (d.has(Caps.CHANNEL)) d.cmd(Caps.CHANNEL, "channelDown") else null
+    fun volumeUp(d: Device): Command? = if (d.has(Caps.VOLUME)) d.cmd(Caps.VOLUME, "volumeUp") else null
+    fun volumeDown(d: Device): Command? = if (d.has(Caps.VOLUME)) d.cmd(Caps.VOLUME, "volumeDown") else null
+    fun mute(d: Device, on: Boolean): Command? = if (d.has(Caps.MUTE)) d.cmd(Caps.MUTE, if (on) "mute" else "unmute") else null
 
     fun input(d: Device, source: String): Command? = when {
-        d.has(Caps.INPUT_SAMSUNG) -> Command(Caps.INPUT_SAMSUNG, "setInputSource", listOf(source))
-        d.has(Caps.INPUT) -> Command(Caps.INPUT, "setInputSource", listOf(source))
+        d.has(Caps.INPUT_SAMSUNG) -> d.cmd(Caps.INPUT_SAMSUNG, "setInputSource", listOf(source))
+        d.has(Caps.INPUT) -> d.cmd(Caps.INPUT, "setInputSource", listOf(source))
         else -> null
     }
 
     fun playback(d: Device, action: String): Command? =
-        if (d.has(Caps.PLAYBACK)) Command(Caps.PLAYBACK, action) else null
+        if (d.has(Caps.PLAYBACK)) d.cmd(Caps.PLAYBACK, action) else null
 
     fun launch(d: Device, app: TvApp): Command? =
-        if (d.has(Caps.LAUNCH)) Command(Caps.LAUNCH, "launchApp", listOf(app.appId)) else null
+        if (d.has(Caps.LAUNCH)) d.cmd(Caps.LAUNCH, "launchApp", listOf(app.appId)) else null
+
+    /** Comandos relativos: depois deles o app relê o estado real da TV. */
+    fun isRelative(c: Command): Boolean = c.capability in setOf(Caps.VOLUME, Caps.CHANNEL, Caps.MUTE, Caps.INPUT, Caps.INPUT_SAMSUNG, Caps.PLAYBACK, Caps.LAUNCH)
+
+    /** Nomes alternativos de cada tecla, na ordem de preferência. */
+    val keyAliases: Map<RemoteKey, List<String>> = mapOf(
+        RemoteKey.UP to listOf("UP", "KEY_UP"),
+        RemoteKey.DOWN to listOf("DOWN", "KEY_DOWN"),
+        RemoteKey.LEFT to listOf("LEFT", "KEY_LEFT"),
+        RemoteKey.RIGHT to listOf("RIGHT", "KEY_RIGHT"),
+        RemoteKey.OK to listOf("OK", "SELECT", "ENTER", "KEY_ENTER"),
+        RemoteKey.BACK to listOf("BACK", "RETURN", "KEY_RETURN"),
+        RemoteKey.HOME to listOf("HOME", "SMART_HUB", "KEY_HOME"),
+        RemoteKey.MENU to listOf("MENU", "SETTINGS", "KEY_MENU"),
+    )
+
+    /** Escolhe, para cada tecla, o nome que a TV aceita (lista vinda da SmartThings). */
+    fun resolveKeys(accepted: List<String>): Map<RemoteKey, String> {
+        if (accepted.isEmpty()) return emptyMap()
+        val up = accepted.associateBy { it.uppercase() }
+        return RemoteKey.values().mapNotNull { k ->
+            keyAliases[k]?.firstNotNullOfOrNull { up[it] }?.let { k to it }
+        }.toMap()
+    }
 }
 
 /** Nomes em português para valores da SmartThings. */

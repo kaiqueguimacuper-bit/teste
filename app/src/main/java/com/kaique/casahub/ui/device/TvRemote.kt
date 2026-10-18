@@ -30,6 +30,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.VolumeDown
 import androidx.compose.material.icons.automirrored.rounded.VolumeOff
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Add
@@ -50,9 +51,12 @@ import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -90,6 +94,7 @@ import com.kaique.casahub.ui.theme.Palette
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 /**
  * Toque que repete enquanto o dedo fica pressionado (volume, canal, setas).
@@ -109,10 +114,10 @@ fun Modifier.repeatPress(enabled: Boolean = true, repeat: Boolean = true, onPres
             var job: Job? = null
             if (repeat) {
                 job = scope.launch {
-                    delay(420)
+                    delay(450)
                     while (true) {
                         action()
-                        delay(110)
+                        delay(260)
                     }
                 }
             }
@@ -129,15 +134,19 @@ fun TvRemote(device: Device, store: HomeStore) {
     val s = device.state
     val on = s.switchOn != false
     val offline = s.online == false
+    val ready = !offline
     val hasKeys = device.has(Caps.REMOTE) || device.has(Caps.KEYPAD)
     var showSources by rememberSaveable { mutableStateOf(false) }
     var showKeypad by rememberSaveable { mutableStateOf(false) }
 
-    fun send(cmd: Command?, optimistic: ((com.kaique.casahub.data.DeviceState) -> com.kaique.casahub.data.DeviceState)? = null) {
+    fun send(cmd: Command?, coalesce: Boolean = false, optimistic: ((com.kaique.casahub.data.DeviceState) -> com.kaique.casahub.data.DeviceState)? = null) {
         tick()
-        store.fire(device, cmd, optimistic)
+        store.fire(device, cmd, coalesce, optimistic)
     }
-    fun key(k: RemoteKey) = send(TvCommands.key(device, k))
+    fun key(k: RemoteKey) {
+        tick()
+        store.pressKey(device, k, coalesce = true)
+    }
 
     Column(
         Modifier.fillMaxWidth(),
@@ -152,17 +161,16 @@ fun TvRemote(device: Device, store: HomeStore) {
             LabeledButton("Energia") {
                 RoundButton(
                     Icons.Rounded.PowerSettingsNew, if (on) "Desligar TV" else "Ligar TV",
-                    onClick = { tick(); store.toggle(device) },
+                    onClick = { tick(); store.toggle(device, force = true) },
                     size = 60.dp,
-                    container = if (on) Palette.Coral else Palette.Green,
+                    container = if (on && !offline) Palette.Coral else Palette.Green,
                     tint = Palette.Bg,
-                    enabled = !offline,
                 )
             }
             LabeledButton("Fonte") {
                 RoundButton(Icons.Rounded.Input, "Escolher fonte", onClick = { tick(); showSources = !showSources },
                     size = 60.dp, container = if (showSources) Palette.Accent else Palette.Surface2,
-                    tint = if (showSources) Palette.Bg else Palette.Text, enabled = !offline && on)
+                    tint = if (showSources) Palette.Bg else Palette.Text, enabled = ready)
             }
             LabeledButton(if (s.muted == true) "Sem som" else "Mudo") {
                 RoundButton(
@@ -172,13 +180,13 @@ fun TvRemote(device: Device, store: HomeStore) {
                     size = 60.dp,
                     container = if (s.muted == true) Palette.Amber else Palette.Surface2,
                     tint = if (s.muted == true) Palette.Bg else Palette.Text,
-                    enabled = !offline && on && device.has(Caps.MUTE),
+                    enabled = ready && device.has(Caps.MUTE),
                 )
             }
             LabeledButton("Números") {
                 RoundButton(Icons.Rounded.Dialpad, "Teclado numérico", onClick = { tick(); showKeypad = !showKeypad },
                     size = 60.dp, container = if (showKeypad) Palette.Accent else Palette.Surface2,
-                    tint = if (showKeypad) Palette.Bg else Palette.Text, enabled = !offline && on)
+                    tint = if (showKeypad) Palette.Bg else Palette.Text, enabled = ready)
             }
         }
 
@@ -194,12 +202,12 @@ fun TvRemote(device: Device, store: HomeStore) {
         }
 
         AnimatedVisibility(showKeypad, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
-            Keypad(device, onSend = { cmd, opt -> send(cmd, opt) }, onDone = { showKeypad = false })
+            Keypad(device, onSend = { cmd, opt -> send(cmd, optimistic = opt) }, onDone = { showKeypad = false })
         }
 
         // Direcional
-        Box(Modifier.alpha(if (on && !offline) 1f else 0.45f)) {
-            DPad(enabled = hasKeys && on && !offline, onKey = ::key)
+        Box(Modifier.alpha(if (ready) 1f else 0.45f)) {
+            DPad(enabled = hasKeys && ready, onKey = ::key)
         }
         if (!hasKeys && !offline) {
             Text(
@@ -210,9 +218,9 @@ fun TvRemote(device: Device, store: HomeStore) {
 
         // Voltar, Início, Menu
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            LabeledButton("Voltar") { RoundButton(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar", { key(RemoteKey.BACK) }, size = 58.dp, enabled = hasKeys && on && !offline) }
-            LabeledButton("Início") { RoundButton(Icons.Rounded.Home, "Início", { key(RemoteKey.HOME) }, size = 58.dp, enabled = hasKeys && on && !offline) }
-            LabeledButton("Menu") { RoundButton(Icons.Rounded.Menu, "Menu", { key(RemoteKey.MENU) }, size = 58.dp, enabled = hasKeys && on && !offline) }
+            LabeledButton("Voltar") { RoundButton(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar", { key(RemoteKey.BACK) }, size = 58.dp, enabled = hasKeys && ready) }
+            LabeledButton("Início") { RoundButton(Icons.Rounded.Home, "Início", { key(RemoteKey.HOME) }, size = 58.dp, enabled = hasKeys && ready) }
+            LabeledButton("Menu") { RoundButton(Icons.Rounded.Menu, "Menu", { key(RemoteKey.MENU) }, size = 58.dp, enabled = hasKeys && ready) }
         }
 
         // Volume e canal
@@ -223,9 +231,9 @@ fun TvRemote(device: Device, store: HomeStore) {
         ) {
             Rocker(
                 label = "VOL",
-                enabled = on && !offline && device.has(Caps.VOLUME),
-                onUp = { send(TvCommands.volumeUp(device)) { it.copy(volume = ((it.volume ?: 0) + 1).coerceAtMost(100), muted = false) } },
-                onDown = { send(TvCommands.volumeDown(device)) { it.copy(volume = ((it.volume ?: 0) - 1).coerceAtLeast(0)) } },
+                enabled = ready && device.has(Caps.VOLUME),
+                onUp = { send(TvCommands.volumeUp(device), coalesce = true) { it.copy(volume = ((it.volume ?: 0) + 1).coerceAtMost(100), muted = false) } },
+                onDown = { send(TvCommands.volumeDown(device), coalesce = true) { it.copy(volume = ((it.volume ?: 0) - 1).coerceAtLeast(0)) } },
                 upIcon = Icons.Rounded.Add,
                 downIcon = Icons.Rounded.Remove,
             )
@@ -239,12 +247,36 @@ fun TvRemote(device: Device, store: HomeStore) {
             }
             Rocker(
                 label = "CH",
-                enabled = on && !offline && device.has(Caps.CHANNEL),
-                onUp = { send(TvCommands.channelUp(device)) },
-                onDown = { send(TvCommands.channelDown(device)) },
+                enabled = ready && device.has(Caps.CHANNEL),
+                onUp = { send(TvCommands.channelUp(device), coalesce = true) },
+                onDown = { send(TvCommands.channelDown(device), coalesce = true) },
                 upIcon = Icons.Rounded.KeyboardArrowUp,
                 downIcon = Icons.Rounded.KeyboardArrowDown,
             )
+        }
+
+        // Volume exato: arraste e solte (manda o valor certo para a TV)
+        if (device.has(Caps.VOLUME)) {
+            var vol by remember(s.volume) { mutableFloatStateOf((s.volume ?: 0).toFloat()) }
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(32.dp)).background(Palette.Surface).padding(horizontal = 16.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.AutoMirrored.Rounded.VolumeDown, null, tint = Palette.Muted)
+                Slider(
+                    value = vol,
+                    onValueChange = { vol = it },
+                    onValueChangeFinished = {
+                        val v = vol.roundToInt()
+                        send(device.cmd(Caps.VOLUME, "setVolume", listOf(v))) { it.copy(volume = v, muted = false) }
+                    },
+                    valueRange = 0f..100f,
+                    enabled = ready,
+                    colors = SliderDefaults.colors(thumbColor = Palette.Text, activeTrackColor = Palette.Accent, inactiveTrackColor = Palette.Surface3),
+                    modifier = Modifier.weight(1f).padding(horizontal = 10.dp),
+                )
+                Text("${vol.roundToInt()}", style = MaterialTheme.typography.titleMedium, modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
+            }
         }
 
         // Reprodução
@@ -254,14 +286,14 @@ fun TvRemote(device: Device, store: HomeStore) {
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(32.dp)).background(Palette.Surface).padding(10.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically,
             ) {
-                RoundButton(Icons.Rounded.FastRewind, "Voltar a fita", { send(TvCommands.playback(device, "rewind")) }, size = 48.dp, container = Color.Transparent, enabled = on && !offline)
+                RoundButton(Icons.Rounded.FastRewind, "Voltar a fita", { send(TvCommands.playback(device, "rewind")) }, size = 48.dp, container = Color.Transparent, enabled = ready)
                 RoundButton(
                     if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, if (playing) "Pausar" else "Reproduzir",
                     { send(TvCommands.playback(device, if (playing) "pause" else "play")) { it.copy(playback = if (playing) "paused" else "playing") } },
-                    size = 60.dp, container = Palette.Text, tint = Palette.Bg, enabled = on && !offline, iconSize = 30.dp,
+                    size = 60.dp, container = Palette.Text, tint = Palette.Bg, enabled = ready, iconSize = 30.dp,
                 )
-                RoundButton(Icons.Rounded.Stop, "Parar", { send(TvCommands.playback(device, "stop")) { it.copy(playback = "stopped") } }, size = 48.dp, container = Color.Transparent, enabled = on && !offline)
-                RoundButton(Icons.Rounded.FastForward, "Avançar", { send(TvCommands.playback(device, "fastForward")) }, size = 48.dp, container = Color.Transparent, enabled = on && !offline)
+                RoundButton(Icons.Rounded.Stop, "Parar", { send(TvCommands.playback(device, "stop")) { it.copy(playback = "stopped") } }, size = 48.dp, container = Color.Transparent, enabled = ready)
+                RoundButton(Icons.Rounded.FastForward, "Avançar", { send(TvCommands.playback(device, "fastForward")) }, size = 48.dp, container = Color.Transparent, enabled = ready)
             }
         }
 
@@ -272,7 +304,7 @@ fun TvRemote(device: Device, store: HomeStore) {
                 TvCommands.apps.chunked(2).forEach { row ->
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         row.forEach { app ->
-                            AppTile(app, Modifier.weight(1f), enabled = on && !offline) { send(TvCommands.launch(device, app)) { it.copy(playback = "playing") } }
+                            AppTile(app, Modifier.weight(1f), enabled = ready) { send(TvCommands.launch(device, app)) { it.copy(playback = "playing") } }
                         }
                     }
                 }

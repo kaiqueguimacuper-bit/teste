@@ -106,7 +106,7 @@ fun CasaHubApp(store: HomeStore, initialScreen: String? = null) {
         }
     }
 
-    BackHandler(enabled = state.loggedIn && openId != null) { openId = null }
+    BackHandler(enabled = state.loggedIn && openId != null) { store.deviceClosed(); openId = null }
     BackHandler(enabled = state.loggedIn && openId == null && tab != 0) { tab = 0 }
 
     Box(Modifier.fillMaxSize().background(Palette.Bg)) {
@@ -131,7 +131,7 @@ fun CasaHubApp(store: HomeStore, initialScreen: String? = null) {
             ) { id ->
                 val d = state.devices.firstOrNull { it.id == id }
                 if (d != null) {
-                    DeviceScreen(d, state, store, onBack = { openId = null })
+                    DeviceScreen(d, state, store, onBack = { store.deviceClosed(); openId = null })
                 } else {
                     Box(Modifier.fillMaxSize()) {
                         when (tab) {

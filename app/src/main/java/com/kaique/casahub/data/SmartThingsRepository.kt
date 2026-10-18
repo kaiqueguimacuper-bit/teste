@@ -22,8 +22,29 @@ class SmartThingsRepository(
 
     // ---------- HTTP ----------
 
+    private val log = ArrayDeque<ApiLogEntry>()
+
+    override fun diagnostics(): List<ApiLogEntry> = synchronized(log) { log.toList().asReversed() }
+
+    private fun record(method: String, url: String, code: Int, started: Long, detail: String?) {
+        val path = url.removePrefix(base)
+        synchronized(log) {
+            log.addLast(ApiLogEntry(System.currentTimeMillis(), method, path, code, System.currentTimeMillis() - started, detail))
+            while (log.size > 60) log.removeFirst()
+        }
+    }
+
+    /** Extrai a mensagem de erro que a SmartThings manda no corpo da resposta. */
+    private fun errorDetail(text: String): String? = runCatching {
+        val err = JSONObject(text).optJSONObject("error") ?: return@runCatching null
+        val details = err.optJSONArray("details")
+        val first = details?.optJSONObject(0)?.optString("message")?.takeIf { it.isNotBlank() }
+        first ?: err.optString("message").takeIf { it.isNotBlank() }
+    }.getOrNull()
+
     private suspend fun request(method: String, url: String, body: JSONObject? = null): JSONObject =
         withContext(Dispatchers.IO) {
+            val started = System.currentTimeMillis()
             val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod = method
                 connectTimeout = 10_000
@@ -41,17 +62,24 @@ class SmartThingsRepository(
                 val stream = if (code in 200..299) conn.inputStream else conn.errorStream
                 val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
                 if (code !in 200..299) {
+                    val detail = errorDetail(text)
+                    record(method, url, code, started, detail ?: text.take(200))
                     val msg = when (code) {
                         401 -> "Token inválido ou expirado. Gere um novo token."
-                        403 -> "O token não tem permissão para isso. Marque todas as permissões ao criar o token."
+                        403 -> "O token não tem permissão para isso. Crie o token marcando todas as permissões."
                         404 -> "Não encontrado na SmartThings."
-                        429 -> "Muitas requisições. Aguarde alguns segundos."
-                        else -> "Erro da SmartThings ($code)"
+                        409 -> "O aparelho está desligado ou sem conexão com a SmartThings."
+                        422 -> "Comando recusado pelo aparelho" + (detail?.let { ": $it" } ?: ".")
+                        429 -> "Muitos comandos seguidos. Aguarde um instante."
+                        in 500..599 -> "A SmartThings está instável agora ($code). Tente de novo."
+                        else -> "Erro da SmartThings ($code)" + (detail?.let { ": $it" } ?: "")
                     }
                     throw ApiException(code, msg)
                 }
-                if (text.isBlank()) JSONObject() else JSONObject(text)
+                record(method, url, code, started, null)
+                if (text.isBlank() || !text.trimStart().startsWith("{")) JSONObject() else JSONObject(text)
             } catch (e: IOException) {
+                record(method, url, -1, started, e.javaClass.simpleName + ": " + e.message)
                 throw ApiException(-1, "Sem conexão com a SmartThings. Verifique a internet.")
             } finally {
                 conn.disconnect()
@@ -83,17 +111,31 @@ class SmartThingsRepository(
         list("$base/locations/${enc(locationId)}/rooms").map { Room(it.optString("roomId"), it.optString("name")) }
 
     override suspend fun devices(locationId: String): List<Device> =
-        list("$base/devices?locationId=${enc(locationId)}").map { d ->
+        list("$base/devices?locationId=${enc(locationId)}&includeHealth=true").map { d ->
             val caps = mutableSetOf<String>()
+            val capComponents = mutableMapOf<String, String>()
+            val capVersions = mutableMapOf<String, Int>()
             var category: String? = null
             val comps = d.optJSONArray("components") ?: JSONArray()
-            for (i in 0 until comps.length()) {
-                val comp = comps.optJSONObject(i) ?: continue
-                if (comp.optString("id") != "main") continue
+            // "main" primeiro: se a mesma capacidade aparecer em outro componente, vale a do main.
+            val ordered = (0 until comps.length()).mapNotNull { comps.optJSONObject(it) }
+                .sortedBy { if (it.optString("id") == "main") 0 else 1 }
+            for (comp in ordered) {
+                val compId = comp.optString("id").ifBlank { "main" }
                 val cs = comp.optJSONArray("capabilities") ?: JSONArray()
-                for (j in 0 until cs.length()) cs.optJSONObject(j)?.optString("id")?.let(caps::add)
-                val cats = comp.optJSONArray("categories")
-                if (cats != null && cats.length() > 0) category = cats.optJSONObject(0)?.optString("name")
+                for (j in 0 until cs.length()) {
+                    val c = cs.optJSONObject(j) ?: continue
+                    val id = c.optString("id").ifBlank { null } ?: continue
+                    if (id !in caps) {
+                        caps += id
+                        capComponents[id] = compId
+                        capVersions[id] = c.optInt("version", 1)
+                    }
+                }
+                if (category == null) {
+                    val cats = comp.optJSONArray("categories")
+                    if (cats != null && cats.length() > 0) category = cats.optJSONObject(0)?.optString("name")
+                }
             }
             val label = d.optString("label").ifBlank { d.optString("name", "Dispositivo") }
             val health = d.optJSONObject("healthState")?.optString("state")
@@ -103,14 +145,15 @@ class SmartThingsRepository(
                 roomId = d.optString("roomId").ifBlank { null },
                 capabilities = caps,
                 category = category,
-                state = DeviceState(online = health?.let { it == "ONLINE" }),
+                state = DeviceState(online = health?.let { if (it == "UNKNOWN") null else it == "ONLINE" }),
+                capComponents = capComponents,
+                capVersions = capVersions,
             )
         }
 
     override suspend fun status(deviceId: String): DeviceState {
         val json = request("GET", "$base/devices/${enc(deviceId)}/status")
-        val main = json.optJSONObject("components")?.optJSONObject("main") ?: JSONObject()
-        return parseStatus(main)
+        return parseStatus(mergeComponents(json.optJSONObject("components")))
     }
 
     override suspend fun command(deviceId: String, cmd: Command) {
@@ -125,7 +168,35 @@ class SmartThingsRepository(
                     .put("arguments", args),
             ),
         )
-        request("POST", "$base/devices/${enc(deviceId)}/commands", body)
+        val res = request("POST", "$base/devices/${enc(deviceId)}/commands", body)
+        val results = res.optJSONArray("results")
+        if (results != null) {
+            for (i in 0 until results.length()) {
+                val st = results.optJSONObject(i)?.optString("status").orEmpty()
+                if (st.equals("FAILED", true)) throw ApiException(422, "O aparelho não executou o comando.")
+            }
+        }
+    }
+
+    override suspend fun refreshDevice(deviceId: String, component: String) {
+        command(deviceId, Command(Caps.REFRESH, "refresh", component = component))
+    }
+
+    private val argCache = mutableMapOf<String, List<String>>()
+
+    override suspend fun commandArgValues(capability: String, version: Int, command: String): List<String> {
+        val key = "$capability/$version/$command"
+        argCache[key]?.let { return it }
+        val def = request("GET", "$base/capabilities/${enc(capability)}/$version")
+        val args = def.optJSONObject("commands")?.optJSONObject(command)?.optJSONArray("arguments") ?: JSONArray()
+        val values = mutableListOf<String>()
+        for (i in 0 until args.length()) {
+            val en = args.optJSONObject(i)?.optJSONObject("schema")?.optJSONArray("enum") ?: continue
+            for (j in 0 until en.length()) en.optString(j).takeIf { it.isNotBlank() }?.let(values::add)
+            if (values.isNotEmpty()) break
+        }
+        argCache[key] = values
+        return values
     }
 
     override suspend fun scenes(locationId: String): List<Scene> =
@@ -163,6 +234,21 @@ class SmartThingsRepository(
             else -> null
         }
 
+        /** Junta as capacidades de todos os componentes; as do "main" têm prioridade. */
+        fun mergeComponents(components: JSONObject?): JSONObject {
+            val merged = JSONObject()
+            if (components == null) return merged
+            val names = components.keys().asSequence().toList().sortedBy { if (it == "main") 1 else 0 }
+            for (n in names) {
+                val comp = components.optJSONObject(n) ?: continue
+                for (cap in comp.keys()) {
+                    if (n != "main" && merged.has(cap)) continue
+                    merged.put(cap, comp.opt(cap))
+                }
+            }
+            return merged
+        }
+
         fun parseStatus(m: JSONObject): DeviceState = DeviceState(
             online = (m.attr(Caps.HEALTH, "healthStatus") as? String)?.let { it.equals("online", true) },
             switchOn = (m.attr(Caps.SWITCH, "switch") as? String)?.let { it == "on" },
@@ -194,7 +280,7 @@ class SmartThingsRepository(
             battery = m.attr(Caps.BATTERY, "battery").num()?.toInt(),
             power = m.attr(Caps.POWER, "power").num(),
             volume = m.attr(Caps.VOLUME, "volume").num()?.toInt(),
-            muted = (m.attr(Caps.MUTE, "mute") as? String)?.let { it == "muted" },
+            muted = (m.attr(Caps.MUTE, "mute") as? String)?.let { it == "muted" || it == "mute" },
             shadeLevel = m.attr(Caps.SHADE_LEVEL, "shadeLevel").num()?.toInt(),
             shadeState = m.attr(Caps.SHADE, "windowShade") as? String,
         )
