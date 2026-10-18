@@ -78,7 +78,7 @@ jobs:
         run: |
           TAG="build-${{ github.run_number }}"
           FILES="saida/CasaHub.apk saida/CasaHub-debug.apk"
-          ls shots/* >/dev/null 2>&1 && FILES="$FILES $(ls shots/*)"
+          [ -d shots ] && FILES="$FILES $(find shots -type f -size +0 | sort | tr '\n' ' ')"
           gh release create "$TAG" $FILES \
             --title "CasaHub ${{ github.run_number }}" \
             --notes "APK gerado automaticamente. Baixe CasaHub.apk no celular e instale." \
