@@ -290,6 +290,7 @@ class HomeStore(
     private val locals = mutableMapOf<String, LocalTvRemote>()
     private val localWatch = mutableMapOf<String, Job>()
     private val demoLocal = mutableSetOf<String>()
+    private val autoTried = mutableSetOf<String>()
 
     private fun localFor(id: String): LocalTvRemote? = synchronized(locals) { locals[id] }?.takeIf { it.isConnected }
 
@@ -556,7 +557,12 @@ class HomeStore(
         scheduleSync(device, delayMs = 0)
         refreshInBackground(device)
         if (device.kind == DeviceKind.TV && synchronized(locals) { locals[device.id] } == null) {
-            settings.localTv(device.id)?.let { startLocal(device, it) }
+            val saved = settings.localTv(device.id)
+            when {
+                saved != null -> startLocal(device, saved)
+                // Primeira vez: procura a TV no Wi-Fi sozinho (uma vez por sessão), sem precisar tocar em nada.
+                !r.isDemo && autoTried.add(device.id) -> connectLocal(device)
+            }
         }
         if (device.has(Caps.REMOTE) && device.id !in keyNames) {
             scope.launch {
